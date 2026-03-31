@@ -10,7 +10,6 @@ struct RawModeGuard;
 impl RawModeGuard {
     fn enable() -> io::Result<Self> {
         terminal::enable_raw_mode()?;
-        // Enable bracketed paste so we can distinguish pasted text from typed text
         crossterm::execute!(io::stdout(), EnableBracketedPaste)?;
         Ok(Self)
     }
@@ -29,8 +28,10 @@ const CONTINUATION: &str = "  . ";
 /// A line editor that tracks cursor position within the current line.
 struct LineEditor {
     lines: Vec<String>,
-    cursor: usize, // cursor position within the current (last) line
+    cursor: usize,
     consecutive_newlines: usize,
+    /// How many lines are currently displayed on the terminal
+    displayed_lines: usize,
 }
 
 impl LineEditor {
@@ -39,6 +40,7 @@ impl LineEditor {
             lines: vec![String::new()],
             cursor: 0,
             consecutive_newlines: 0,
+            displayed_lines: 1,
         }
     }
 
@@ -67,6 +69,7 @@ impl LineEditor {
             return true; // signal: submit
         }
         self.lines.push(String::new());
+        self.displayed_lines = self.lines.len();
         self.cursor = 0;
         false
     }
@@ -78,12 +81,12 @@ impl LineEditor {
             self.lines.pop();
             self.cursor = self.current_line().len();
             self.consecutive_newlines = 0;
-            return true; // redraw needed (went up a line)
+            self.displayed_lines = self.lines.len();
+            return true; // went up a line
         }
 
         if !is_current_empty && self.cursor > 0 {
             let line = self.lines.last_mut().unwrap();
-            // Find the previous character boundary
             let new_cursor = line[..self.cursor]
                 .char_indices()
                 .last()
@@ -94,6 +97,18 @@ impl LineEditor {
             self.consecutive_newlines = 0;
         }
         false
+    }
+
+    fn delete_at_cursor(&mut self) {
+        let line = self.lines.last_mut().unwrap();
+        if self.cursor < line.len() {
+            let next = line[self.cursor..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| self.cursor + i)
+                .unwrap_or(line.len());
+            line.replace_range(self.cursor..next, "");
+        }
     }
 
     fn move_left(&mut self) {
@@ -127,46 +142,55 @@ impl LineEditor {
         self.cursor = self.current_line().len();
     }
 
-    /// Delete from cursor to end of line (Ctrl+K)
     fn kill_to_end(&mut self) {
         let line = self.lines.last_mut().unwrap();
         line.truncate(self.cursor);
     }
 
-    /// Clear entire current line (Ctrl+U)
     fn clear_line(&mut self) {
         self.lines.last_mut().unwrap().clear();
         self.cursor = 0;
     }
 
-    /// Delete previous word (Ctrl+W)
     fn delete_word(&mut self) {
         if self.cursor == 0 {
             return;
         }
         let line = self.lines.last_mut().unwrap();
         let before = &line[..self.cursor];
-        // Skip trailing spaces, then skip non-spaces
-        let new_cursor = before
-            .trim_end()
-            .rfind(|c: char| c.is_whitespace())
-            .map(|i| i + 1)
-            .unwrap_or(0);
+        // Find the start of the previous word
+        let trimmed = before.trim_end();
+        let new_cursor = if trimmed.is_empty() {
+            0
+        } else {
+            // Find last whitespace, then advance past it (char-aware)
+            match trimmed.rfind(|c: char| c.is_whitespace()) {
+                Some(byte_idx) => {
+                    // Advance past the whitespace character
+                    let ws_char = trimmed[byte_idx..].chars().next().unwrap();
+                    byte_idx + ws_char.len_utf8()
+                }
+                None => 0,
+            }
+        };
         line.replace_range(new_cursor..self.cursor, "");
         self.cursor = new_cursor;
     }
 
-    /// Insert pasted text (may contain newlines)
+    /// Insert pasted text (may contain newlines). Normalizes \r\n to \n.
     fn insert_paste(&mut self, text: &str) {
         self.consecutive_newlines = 0;
-        for c in text.chars() {
-            if c == '\n' || c == '\r' {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        for (i, part) in normalized.split('\n').enumerate() {
+            if i > 0 {
                 self.lines.push(String::new());
                 self.cursor = 0;
-            } else {
+            }
+            for c in part.chars() {
                 self.insert_char(c);
             }
         }
+        self.displayed_lines = self.lines.len();
     }
 
     fn full_text(&self) -> String {
@@ -175,7 +199,6 @@ impl LineEditor {
 }
 
 /// Read user input from the terminal.
-/// Supports multiline, paste, cursor movement, and common shortcuts.
 pub fn read_user_input() -> Option<String> {
     print!("\x1b[1;33m{}\x1b[0m", PROMPT);
     io::stdout().flush().ok();
@@ -197,14 +220,13 @@ pub fn read_user_input() -> Option<String> {
         };
 
         match event {
-            // Bracketed paste — handle pasted text as a block
             Event::Paste(text) => {
+                let old_displayed = editor.displayed_lines;
                 editor.insert_paste(&text);
-                redraw_all(&editor);
+                redraw_all(&editor, old_displayed);
             }
 
             Event::Key(key_event) => match key_event {
-                // Ctrl+C → exit
                 KeyEvent {
                     code: KeyCode::Char('c'),
                     modifiers: KeyModifiers::CONTROL,
@@ -214,7 +236,6 @@ pub fn read_user_input() -> Option<String> {
                     return None;
                 }
 
-                // Ctrl+D on empty → exit
                 KeyEvent {
                     code: KeyCode::Char('d'),
                     modifiers: KeyModifiers::CONTROL,
@@ -224,7 +245,6 @@ pub fn read_user_input() -> Option<String> {
                     return None;
                 }
 
-                // Enter
                 KeyEvent {
                     code: KeyCode::Enter,
                     ..
@@ -239,14 +259,12 @@ pub fn read_user_input() -> Option<String> {
                     io::stdout().flush().ok();
                 }
 
-                // Backspace
                 KeyEvent {
                     code: KeyCode::Backspace,
                     ..
                 } => {
                     let went_up = editor.backspace();
                     if went_up {
-                        // Went to previous line — need to redraw
                         let line = editor.current_line().to_string();
                         let prefix = line_prefix(editor.lines.len() == 1);
                         print!("\x1b[A\r\x1b[2K{}{}", prefix, line);
@@ -257,24 +275,14 @@ pub fn read_user_input() -> Option<String> {
                     }
                 }
 
-                // Delete key
                 KeyEvent {
                     code: KeyCode::Delete,
                     ..
                 } => {
-                    let line = editor.lines.last_mut().unwrap();
-                    if editor.cursor < line.len() {
-                        let next = line[editor.cursor..]
-                            .char_indices()
-                            .nth(1)
-                            .map(|(i, _)| editor.cursor + i)
-                            .unwrap_or(line.len());
-                        line.replace_range(editor.cursor..next, "");
-                        redraw_current_line(&editor);
-                    }
+                    editor.delete_at_cursor();
+                    redraw_current_line(&editor);
                 }
 
-                // Left arrow
                 KeyEvent {
                     code: KeyCode::Left,
                     ..
@@ -284,7 +292,6 @@ pub fn read_user_input() -> Option<String> {
                     io::stdout().flush().ok();
                 }
 
-                // Right arrow
                 KeyEvent {
                     code: KeyCode::Right,
                     ..
@@ -294,7 +301,6 @@ pub fn read_user_input() -> Option<String> {
                     io::stdout().flush().ok();
                 }
 
-                // Home / Ctrl+A
                 KeyEvent {
                     code: KeyCode::Home,
                     ..
@@ -309,7 +315,6 @@ pub fn read_user_input() -> Option<String> {
                     io::stdout().flush().ok();
                 }
 
-                // End / Ctrl+E
                 KeyEvent {
                     code: KeyCode::End,
                     ..
@@ -324,7 +329,6 @@ pub fn read_user_input() -> Option<String> {
                     io::stdout().flush().ok();
                 }
 
-                // Ctrl+U — clear line
                 KeyEvent {
                     code: KeyCode::Char('u'),
                     modifiers: KeyModifiers::CONTROL,
@@ -334,7 +338,6 @@ pub fn read_user_input() -> Option<String> {
                     redraw_current_line(&editor);
                 }
 
-                // Ctrl+W — delete word
                 KeyEvent {
                     code: KeyCode::Char('w'),
                     modifiers: KeyModifiers::CONTROL,
@@ -344,7 +347,6 @@ pub fn read_user_input() -> Option<String> {
                     redraw_current_line(&editor);
                 }
 
-                // Ctrl+K — kill to end of line
                 KeyEvent {
                     code: KeyCode::Char('k'),
                     modifiers: KeyModifiers::CONTROL,
@@ -354,7 +356,6 @@ pub fn read_user_input() -> Option<String> {
                     redraw_current_line(&editor);
                 }
 
-                // Regular character
                 KeyEvent {
                     code: KeyCode::Char(c),
                     ..
@@ -362,11 +363,9 @@ pub fn read_user_input() -> Option<String> {
                     let at_end = editor.cursor >= editor.current_line().len();
                     editor.insert_char(c);
                     if at_end {
-                        // Fast path: just print the character
                         print!("{}", c);
                         io::stdout().flush().ok();
                     } else {
-                        // Inserted in middle: redraw line
                         redraw_current_line(&editor);
                     }
                 }
@@ -387,7 +386,6 @@ fn line_prefix(is_first: bool) -> String {
     }
 }
 
-/// Redraw just the current (last) line
 fn redraw_current_line(editor: &LineEditor) {
     let line = editor.current_line();
     let prefix = line_prefix(editor.lines.len() == 1);
@@ -396,15 +394,16 @@ fn redraw_current_line(editor: &LineEditor) {
     io::stdout().flush().ok();
 }
 
-/// Redraw all lines (used after paste)
-fn redraw_all(editor: &LineEditor) {
-    // Move to the first line
-    let up = editor.lines.len() - 1;
+/// Redraw all lines. `old_displayed` is how many lines were on screen before.
+fn redraw_all(editor: &LineEditor, old_displayed: usize) {
+    // Move up to the first displayed line
+    let up = old_displayed.saturating_sub(1);
     if up > 0 {
         print!("\x1b[{}A", up);
     }
     print!("\r");
 
+    // Clear old lines and print new ones
     for (i, line) in editor.lines.iter().enumerate() {
         let prefix = line_prefix(i == 0);
         print!("\x1b[2K{}{}", prefix, line);
@@ -412,11 +411,20 @@ fn redraw_all(editor: &LineEditor) {
             print!("\r\n");
         }
     }
+    // Clear any leftover lines from before
+    let extra = old_displayed.saturating_sub(editor.lines.len());
+    for _ in 0..extra {
+        print!("\r\n\x1b[2K");
+    }
+    if extra > 0 {
+        // Move back up to the last editor line
+        print!("\x1b[{}A", extra);
+    }
+
     position_cursor(editor);
     io::stdout().flush().ok();
 }
 
-/// Move the terminal cursor to match editor.cursor position
 fn position_cursor(editor: &LineEditor) {
     let prefix_width = if editor.lines.len() == 1 {
         display_width(PROMPT)
@@ -425,20 +433,215 @@ fn position_cursor(editor: &LineEditor) {
     };
     let text_before_cursor = &editor.current_line()[..editor.cursor];
     let col = prefix_width + display_width(text_before_cursor);
-    // Move to absolute column (1-based)
-    print!("\r\x1b[{}C", col);
+    if col == 0 {
+        print!("\r");
+    } else {
+        print!("\r\x1b[{}C", col);
+    }
 }
 
-/// Get display width of a string (ASCII = 1, CJK/emoji ≈ 2)
 fn display_width(s: &str) -> usize {
     s.chars()
         .map(|c| {
             if c.is_ascii() {
                 1
             } else {
-                // CJK and most non-ASCII are 2 columns wide
-                2
+                // Rough approximation: CJK fullwidth = 2, others = 1
+                // A proper solution would use the unicode-width crate
+                if is_wide_char(c) {
+                    2
+                } else {
+                    1
+                }
             }
         })
         .sum()
+}
+
+/// Check if a character is likely a wide (fullwidth) character.
+fn is_wide_char(c: char) -> bool {
+    let cp = c as u32;
+    // CJK Unified Ideographs
+    (0x4E00..=0x9FFF).contains(&cp)
+    // CJK Extension A-F
+    || (0x3400..=0x4DBF).contains(&cp)
+    || (0x20000..=0x2A6DF).contains(&cp)
+    // CJK Compatibility Ideographs
+    || (0xF900..=0xFAFF).contains(&cp)
+    // Fullwidth Forms
+    || (0xFF01..=0xFF60).contains(&cp)
+    || (0xFFE0..=0xFFE6).contains(&cp)
+    // Hangul Syllables
+    || (0xAC00..=0xD7AF).contains(&cp)
+    // Katakana / Hiragana
+    || (0x3040..=0x309F).contains(&cp)
+    || (0x30A0..=0x30FF).contains(&cp)
+    // Emoji (common ranges)
+    || (0x1F600..=0x1F64F).contains(&cp)
+    || (0x1F300..=0x1F5FF).contains(&cp)
+    || (0x1F680..=0x1F6FF).contains(&cp)
+    || (0x1F900..=0x1F9FF).contains(&cp)
+    || (0x2600..=0x26FF).contains(&cp)
+    || (0x2700..=0x27BF).contains(&cp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_insert_at_end() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.insert_char('b');
+        assert_eq!(ed.current_line(), "ab");
+        assert_eq!(ed.cursor, 2);
+    }
+
+    #[test]
+    fn test_insert_at_middle() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.insert_char('c');
+        ed.cursor = 1; // between a and c
+        ed.insert_char('b');
+        assert_eq!(ed.current_line(), "abc");
+        assert_eq!(ed.cursor, 2);
+    }
+
+    #[test]
+    fn test_backspace_at_end() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.insert_char('b');
+        ed.backspace();
+        assert_eq!(ed.current_line(), "a");
+        assert_eq!(ed.cursor, 1);
+    }
+
+    #[test]
+    fn test_backspace_at_start_does_nothing() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.cursor = 0;
+        ed.backspace();
+        assert_eq!(ed.current_line(), "a");
+        assert_eq!(ed.cursor, 0);
+    }
+
+    #[test]
+    fn test_backspace_joins_lines() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.newline();
+        // Now on empty second line
+        let went_up = ed.backspace();
+        assert!(went_up);
+        assert_eq!(ed.lines.len(), 1);
+        assert_eq!(ed.current_line(), "a");
+    }
+
+    #[test]
+    fn test_delete_at_cursor() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.insert_char('b');
+        ed.insert_char('c');
+        ed.cursor = 1;
+        ed.delete_at_cursor();
+        assert_eq!(ed.current_line(), "ac");
+        assert_eq!(ed.cursor, 1);
+    }
+
+    #[test]
+    fn test_paste_normalizes_crlf() {
+        let mut ed = LineEditor::new();
+        ed.insert_paste("line1\r\nline2\r\nline3");
+        assert_eq!(ed.lines.len(), 3);
+        assert_eq!(ed.lines[0], "line1");
+        assert_eq!(ed.lines[1], "line2");
+        assert_eq!(ed.lines[2], "line3");
+    }
+
+    #[test]
+    fn test_paste_empty() {
+        let mut ed = LineEditor::new();
+        ed.insert_paste("");
+        assert_eq!(ed.lines.len(), 1);
+        assert_eq!(ed.current_line(), "");
+    }
+
+    #[test]
+    fn test_delete_word_basic() {
+        let mut ed = LineEditor::new();
+        for c in "hello world".chars() {
+            ed.insert_char(c);
+        }
+        ed.delete_word();
+        assert_eq!(ed.current_line(), "hello ");
+    }
+
+    #[test]
+    fn test_delete_word_at_start() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.cursor = 0;
+        ed.delete_word();
+        assert_eq!(ed.current_line(), "a"); // no change
+    }
+
+    #[test]
+    fn test_move_left_right() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('a');
+        ed.insert_char('b');
+        ed.move_left();
+        assert_eq!(ed.cursor, 1);
+        ed.move_right();
+        assert_eq!(ed.cursor, 2);
+    }
+
+    #[test]
+    fn test_newline_submit_on_double() {
+        let mut ed = LineEditor::new();
+        assert!(!ed.newline()); // first Enter
+        assert!(ed.newline()); // second Enter → submit
+    }
+
+    #[test]
+    fn test_consecutive_newlines_reset_on_char() {
+        let mut ed = LineEditor::new();
+        ed.newline();
+        ed.insert_char('a');
+        assert_eq!(ed.consecutive_newlines, 0);
+        assert!(!ed.newline()); // reset, so this is first Enter again
+    }
+
+    #[test]
+    fn test_utf8_insert_and_backspace() {
+        let mut ed = LineEditor::new();
+        ed.insert_char('你');
+        ed.insert_char('好');
+        assert_eq!(ed.current_line(), "你好");
+        ed.backspace();
+        assert_eq!(ed.current_line(), "你");
+    }
+
+    #[test]
+    fn test_display_width_ascii() {
+        assert_eq!(display_width("hello"), 5);
+    }
+
+    #[test]
+    fn test_display_width_cjk() {
+        assert_eq!(display_width("你好"), 4);
+    }
+
+    #[test]
+    fn test_is_wide_char() {
+        assert!(is_wide_char('你'));
+        assert!(is_wide_char('好'));
+        assert!(!is_wide_char('a'));
+        assert!(!is_wide_char('é'));
+    }
 }
