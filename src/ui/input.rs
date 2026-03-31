@@ -32,8 +32,9 @@ struct LineEditor {
     cursor: usize,
     consecutive_newlines: usize,
     displayed_lines: usize,
-    /// Stored pasted content, keyed by ID. Placeholders in lines reference these.
-    pasted: Vec<String>,
+    /// Stored pasted content with unique IDs
+    pasted: Vec<(usize, String)>,
+    next_paste_id: usize,
 }
 
 impl LineEditor {
@@ -44,6 +45,7 @@ impl LineEditor {
             consecutive_newlines: 0,
             displayed_lines: 1,
             pasted: Vec::new(),
+            next_paste_id: 1,
         }
     }
 
@@ -184,12 +186,14 @@ impl LineEditor {
     fn insert_paste(&mut self, text: &str) {
         self.consecutive_newlines = 0;
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        let line_count = normalized.lines().count();
+        let line_count = normalized.split('\n').count();
 
         if line_count > PASTE_COLLAPSE_LINES {
-            // Store full content, insert a placeholder
-            self.pasted.push(normalized);
-            let placeholder = format!("[Pasted: {} lines]", line_count);
+            // Store full content with unique ID, insert a placeholder
+            let id = self.next_paste_id;
+            self.next_paste_id += 1;
+            let placeholder = format!("[Pasted#{}: {} lines]", id, line_count);
+            self.pasted.push((id, normalized));
             for c in placeholder.chars() {
                 self.insert_char(c);
             }
@@ -209,16 +213,23 @@ impl LineEditor {
     }
 
     /// Get full text with paste placeholders expanded back to original content.
+    /// If a placeholder was edited/deleted, appends the content to avoid data loss.
     fn full_text(&self) -> String {
         let raw = self.lines.join("\n");
         if self.pasted.is_empty() {
             return raw;
         }
         let mut result = raw;
-        for content in self.pasted.iter() {
-            let line_count = content.lines().count();
-            let placeholder = format!("[Pasted: {} lines]", line_count);
-            result = result.replacen(&placeholder, content, 1);
+        for (id, content) in self.pasted.iter() {
+            let line_count = content.split('\n').count();
+            let placeholder = format!("[Pasted#{}: {} lines]", id, line_count);
+            if result.contains(&placeholder) {
+                result = result.replacen(&placeholder, content, 1);
+            } else {
+                // Placeholder was edited away — append content to avoid data loss
+                result.push('\n');
+                result.push_str(content);
+            }
         }
         result
     }
@@ -605,11 +616,9 @@ mod tests {
         let mut ed = LineEditor::new();
         let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
         ed.insert_paste(&long_text);
-        // Should be collapsed into a placeholder on a single line
         assert_eq!(ed.lines.len(), 1);
-        assert!(ed.current_line().contains("[Pasted: 10 lines]"));
+        assert!(ed.current_line().contains("[Pasted#1: 10 lines]"));
         assert_eq!(ed.pasted.len(), 1);
-        // full_text should expand the placeholder
         let full = ed.full_text();
         assert!(full.contains("line 1"));
         assert!(full.contains("line 10"));
@@ -620,9 +629,39 @@ mod tests {
         let mut ed = LineEditor::new();
         let text = (1..=5).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
         ed.insert_paste(&text);
-        // 5 lines = threshold, should be inline
         assert_eq!(ed.lines.len(), 5);
         assert!(ed.pasted.is_empty());
+    }
+
+    #[test]
+    fn test_two_pastes_same_length_unique_ids() {
+        let mut ed = LineEditor::new();
+        let text_a = (1..=8).map(|i| format!("a{}", i)).collect::<Vec<_>>().join("\n");
+        let text_b = (1..=8).map(|i| format!("b{}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&text_a);
+        ed.insert_char(' ');
+        ed.insert_paste(&text_b);
+        assert!(ed.current_line().contains("[Pasted#1:"));
+        assert!(ed.current_line().contains("[Pasted#2:"));
+        let full = ed.full_text();
+        assert!(full.contains("a1"));
+        assert!(full.contains("b1"));
+    }
+
+    #[test]
+    fn test_paste_placeholder_edited_away_appends() {
+        let mut ed = LineEditor::new();
+        let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&long_text);
+        assert_eq!(ed.pasted.len(), 1);
+        // Simulate user deleting the placeholder
+        ed.lines[0] = "user typed something else".to_string();
+        ed.cursor = ed.lines[0].len();
+        // full_text should still include the pasted content (appended)
+        let full = ed.full_text();
+        assert!(full.contains("user typed something else"));
+        assert!(full.contains("line 1"));
+        assert!(full.contains("line 10"));
     }
 
     #[test]
