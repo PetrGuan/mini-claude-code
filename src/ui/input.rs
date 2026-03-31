@@ -24,14 +24,16 @@ impl Drop for RawModeGuard {
 
 const PROMPT: &str = "  ◇ ";
 const CONTINUATION: &str = "  . ";
+const PASTE_COLLAPSE_LINES: usize = 5;
 
 /// A line editor that tracks cursor position within the current line.
 struct LineEditor {
     lines: Vec<String>,
     cursor: usize,
     consecutive_newlines: usize,
-    /// How many lines are currently displayed on the terminal
     displayed_lines: usize,
+    /// Stored pasted content, keyed by ID. Placeholders in lines reference these.
+    pasted: Vec<String>,
 }
 
 impl LineEditor {
@@ -41,6 +43,7 @@ impl LineEditor {
             cursor: 0,
             consecutive_newlines: 0,
             displayed_lines: 1,
+            pasted: Vec::new(),
         }
     }
 
@@ -177,24 +180,47 @@ impl LineEditor {
         self.cursor = new_cursor;
     }
 
-    /// Insert pasted text (may contain newlines). Normalizes \r\n to \n.
+    /// Insert pasted text. Long pastes (>5 lines) are collapsed to a placeholder.
     fn insert_paste(&mut self, text: &str) {
         self.consecutive_newlines = 0;
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-        for (i, part) in normalized.split('\n').enumerate() {
-            if i > 0 {
-                self.lines.push(String::new());
-                self.cursor = 0;
-            }
-            for c in part.chars() {
+        let line_count = normalized.lines().count();
+
+        if line_count > PASTE_COLLAPSE_LINES {
+            // Store full content, insert a placeholder
+            self.pasted.push(normalized);
+            let placeholder = format!("[Pasted: {} lines]", line_count);
+            for c in placeholder.chars() {
                 self.insert_char(c);
+            }
+        } else {
+            // Short paste — insert inline
+            for (i, part) in normalized.split('\n').enumerate() {
+                if i > 0 {
+                    self.lines.push(String::new());
+                    self.cursor = 0;
+                }
+                for c in part.chars() {
+                    self.insert_char(c);
+                }
             }
         }
         self.displayed_lines = self.lines.len();
     }
 
+    /// Get full text with paste placeholders expanded back to original content.
     fn full_text(&self) -> String {
-        self.lines.join("\n")
+        let raw = self.lines.join("\n");
+        if self.pasted.is_empty() {
+            return raw;
+        }
+        let mut result = raw;
+        for content in self.pasted.iter() {
+            let line_count = content.lines().count();
+            let placeholder = format!("[Pasted: {} lines]", line_count);
+            result = result.replacen(&placeholder, content, 1);
+        }
+        result
     }
 }
 
@@ -556,13 +582,14 @@ mod tests {
     }
 
     #[test]
-    fn test_paste_normalizes_crlf() {
+    fn test_paste_short_inline() {
         let mut ed = LineEditor::new();
         ed.insert_paste("line1\r\nline2\r\nline3");
         assert_eq!(ed.lines.len(), 3);
         assert_eq!(ed.lines[0], "line1");
         assert_eq!(ed.lines[1], "line2");
         assert_eq!(ed.lines[2], "line3");
+        assert!(ed.pasted.is_empty());
     }
 
     #[test]
@@ -571,6 +598,31 @@ mod tests {
         ed.insert_paste("");
         assert_eq!(ed.lines.len(), 1);
         assert_eq!(ed.current_line(), "");
+    }
+
+    #[test]
+    fn test_paste_long_collapsed() {
+        let mut ed = LineEditor::new();
+        let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&long_text);
+        // Should be collapsed into a placeholder on a single line
+        assert_eq!(ed.lines.len(), 1);
+        assert!(ed.current_line().contains("[Pasted: 10 lines]"));
+        assert_eq!(ed.pasted.len(), 1);
+        // full_text should expand the placeholder
+        let full = ed.full_text();
+        assert!(full.contains("line 1"));
+        assert!(full.contains("line 10"));
+    }
+
+    #[test]
+    fn test_paste_exactly_threshold_is_inline() {
+        let mut ed = LineEditor::new();
+        let text = (1..=5).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&text);
+        // 5 lines = threshold, should be inline
+        assert_eq!(ed.lines.len(), 5);
+        assert!(ed.pasted.is_empty());
     }
 
     #[test]
