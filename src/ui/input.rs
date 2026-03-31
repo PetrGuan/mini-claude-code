@@ -2,7 +2,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use crossterm::terminal;
 use std::io::{self, Write};
 
-/// RAII guard that ensures raw mode is disabled when dropped (I1)
+/// RAII guard that ensures raw mode is disabled when dropped
 struct RawModeGuard;
 
 impl RawModeGuard {
@@ -18,16 +18,18 @@ impl Drop for RawModeGuard {
     }
 }
 
+const PROMPT: &str = "  ◇ ";
+const CONTINUATION: &str = "  . ";
+
 /// Read user input from the terminal.
 /// Supports multiline: press Enter twice to submit, Ctrl+C to exit.
 pub fn read_user_input() -> Option<String> {
-    print!("\x1b[1;33m  ◇ \x1b[0m");
+    print!("\x1b[1;33m{}\x1b[0m", PROMPT);
     io::stdout().flush().ok();
 
-    let mut input = String::new();
+    let mut lines: Vec<String> = vec![String::new()];
     let mut consecutive_newlines = 0;
 
-    // I2: Fail with a clear message instead of silently exiting
     let _guard = match RawModeGuard::enable() {
         Ok(g) => g,
         Err(e) => {
@@ -51,7 +53,7 @@ pub fn read_user_input() -> Option<String> {
                     code: KeyCode::Char('d'),
                     modifiers: KeyModifiers::CONTROL,
                     ..
-                } if input.is_empty() => {
+                } if lines.len() == 1 && lines[0].is_empty() => {
                     println!();
                     return None;
                 }
@@ -62,29 +64,47 @@ pub fn read_user_input() -> Option<String> {
                     consecutive_newlines += 1;
                     if consecutive_newlines >= 2 {
                         println!();
-                        // _guard dropped here → disable_raw_mode called
-                        let trimmed = input.trim().to_string();
+                        let full: String = lines.join("\n");
+                        let trimmed = full.trim().to_string();
                         if trimmed.is_empty() {
                             return Some(String::new());
                         }
                         return Some(trimmed);
                     }
-                    input.push('\n');
-                    print!("\r\n\x1b[2m  . \x1b[0m");
+                    lines.push(String::new());
+                    print!("\r\n\x1b[2m{}\x1b[0m", CONTINUATION);
                     io::stdout().flush().ok();
                 }
                 KeyEvent {
                     code: KeyCode::Backspace,
                     ..
                 } => {
-                    if input.ends_with('\n') {
-                        input.pop();
+                    let is_current_empty = lines.last().map_or(true, |l| l.is_empty());
+                    let line_count = lines.len();
+
+                    if is_current_empty && line_count > 1 {
+                        // Delete the newline — go back to previous line
+                        lines.pop();
                         consecutive_newlines = 0;
-                        print!("\x1b[A\x1b[999C");
+                        let prev = lines.last().unwrap().clone();
+                        let prefix = if lines.len() == 1 {
+                            format!("\x1b[1;33m{}\x1b[0m", PROMPT)
+                        } else {
+                            format!("\x1b[2m{}\x1b[0m", CONTINUATION)
+                        };
+                        print!("\x1b[A\r\x1b[2K{}{}", prefix, prev);
                         io::stdout().flush().ok();
-                    } else if !input.is_empty() {
-                        input.pop();
-                        print!("\x1b[D \x1b[D");
+                    } else if !is_current_empty {
+                        // Delete last character — redraw current line
+                        lines.last_mut().unwrap().pop();
+                        consecutive_newlines = 0;
+                        let current = lines.last().unwrap().clone();
+                        let prefix = if lines.len() == 1 {
+                            format!("\x1b[1;33m{}\x1b[0m", PROMPT)
+                        } else {
+                            format!("\x1b[2m{}\x1b[0m", CONTINUATION)
+                        };
+                        print!("\r\x1b[2K{}{}", prefix, current);
                         io::stdout().flush().ok();
                     }
                 }
@@ -93,7 +113,7 @@ pub fn read_user_input() -> Option<String> {
                     ..
                 } => {
                     consecutive_newlines = 0;
-                    input.push(c);
+                    lines.last_mut().unwrap().push(c);
                     print!("{}", c);
                     io::stdout().flush().ok();
                 }
