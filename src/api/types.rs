@@ -79,7 +79,10 @@ pub enum StreamEvent {
     ContentBlockStop { index: usize },
 
     #[serde(rename = "message_delta")]
-    MessageDelta { delta: MessageDeltaData },
+    MessageDelta {
+        delta: MessageDeltaData,
+        usage: Option<Usage>,
+    },
 
     #[serde(rename = "message_stop")]
     MessageStop,
@@ -96,6 +99,19 @@ pub enum StreamEvent {
 pub struct MessageStartData {
     pub id: String,
     pub model: String,
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Usage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
 }
 
 #[derive(Debug, Deserialize)]

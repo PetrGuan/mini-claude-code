@@ -1,5 +1,6 @@
 mod api;
 mod auth;
+mod cost;
 mod repl;
 mod tools;
 mod ui;

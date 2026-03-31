@@ -3,6 +3,7 @@ use crate::api::stream::SseEvent;
 use crate::api::types::{
     ContentBlock, ContentBlockStartData, DeltaData, Message, Role, StreamEvent,
 };
+use crate::cost::CostTracker;
 use crate::tools::ToolRegistry;
 use crate::ui::input::read_user_input;
 use crate::ui::render::{
@@ -101,6 +102,7 @@ fn format_tool_preview(content: &str, is_error: bool) -> String {
 pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()> {
     let mut messages: Vec<Message> = Vec::new();
     let tool_defs = registry.definitions();
+    let mut cost = CostTracker::new(&client.model);
 
     // Welcome banner
     println!();
@@ -117,14 +119,25 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
         }
         let input = match read_user_input() {
             Some(s) if s.is_empty() => continue,
+            Some(s) if s == "/cost" => {
+                println!();
+                println!("{}", cost.detail());
+                println!();
+                continue;
+            }
             Some(s) => s,
             None => {
-                println!("\n  \x1b[2mGoodbye!\x1b[0m");
+                // Show session summary on exit
+                if cost.turns > 0 {
+                    println!("\n  \x1b[2m{}\x1b[0m", cost.summary());
+                }
+                println!("  \x1b[2mGoodbye!\x1b[0m");
                 break;
             }
         };
 
         turn += 1;
+        cost.add_turn();
         messages.push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text { text: input }],
@@ -219,10 +232,18 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                                 current_text.clear();
                             }
                         }
-                        StreamEvent::MessageDelta { .. } => {}
+                        StreamEvent::MessageDelta { usage, .. } => {
+                            if let Some(u) = usage {
+                                cost.add_usage(&u);
+                            }
+                        }
                         StreamEvent::MessageStop => {}
                         StreamEvent::Ping => {}
-                        StreamEvent::MessageStart { .. } => {}
+                        StreamEvent::MessageStart { message } => {
+                            if let Some(u) = message.usage {
+                                cost.add_usage(&u);
+                            }
+                        }
                         StreamEvent::Error { error } => {
                             eprintln!("\n\x1b[1;31m  API Error: {}\x1b[0m", error.message);
                             stream_error = true;
