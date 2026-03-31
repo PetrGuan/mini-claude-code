@@ -184,7 +184,7 @@ This project was built to:
 2. **Build** — produce a fast, usable CLI tool for daily development tasks
 3. **Explore Rust** — practice Rust with a real-world async + CLI project
 
-Claude Code is ~512K lines of TypeScript. This is ~1,400 lines of Rust doing the essential 20%.
+~1,400 lines of Rust, focused on the essential 20% of functionality.
 
 ## License
 
