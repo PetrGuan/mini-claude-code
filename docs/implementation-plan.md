@@ -59,7 +59,7 @@ mini-claude-code/
 - [ ] **Step 1: Initialize Cargo project**
 
 ```bash
-cd /Users/petr/Documents/GitHub/mini-claude-code
+cd .
 cargo init --name mini-claude-code
 ```
 
@@ -126,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
 - [ ] **Step 4: Verify it compiles and runs**
 
 ```bash
-cd /Users/petr/Documents/GitHub/mini-claude-code
+cd .
 cargo build
 cargo run -- --help
 ```
@@ -2315,7 +2315,7 @@ git commit -m "feat: REPL loop with streaming output and tool execution"
 - [ ] **Step 1: Build release binary**
 
 ```bash
-cd /Users/petr/Documents/GitHub/mini-claude-code
+cd .
 cargo build --release
 ```
 
