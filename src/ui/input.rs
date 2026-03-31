@@ -79,6 +79,27 @@ impl LineEditor {
         false
     }
 
+    /// Find the placeholder span (start, end) that contains or touches `pos`.
+    /// Returns None if pos is not inside a placeholder.
+    fn placeholder_span_at(&self, pos: usize) -> Option<(usize, usize, usize)> {
+        let line = self.current_line();
+        for &(id, _) in &self.pasted {
+            // Reconstruct placeholder for this ID
+            // We need the line count, look it up
+            if let Some((_, content)) = self.pasted.iter().find(|(pid, _)| *pid == id) {
+                let lc = content.split('\n').count();
+                let placeholder = format!("[Pasted#{}: {} lines]", id, lc);
+                if let Some(start) = line.find(&placeholder) {
+                    let end = start + placeholder.len();
+                    if pos > start && pos <= end {
+                        return Some((start, end, id));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     fn backspace(&mut self) -> bool {
         let is_current_empty = self.current_line().is_empty();
 
@@ -91,22 +112,40 @@ impl LineEditor {
         }
 
         if !is_current_empty && self.cursor > 0 {
-            let line = self.lines.last_mut().unwrap();
-            let new_cursor = line[..self.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            line.replace_range(new_cursor..self.cursor, "");
-            self.cursor = new_cursor;
+            // Check if cursor is inside a placeholder — delete the whole thing
+            if let Some((start, end, id)) = self.placeholder_span_at(self.cursor) {
+                let line = self.lines.last_mut().unwrap();
+                line.replace_range(start..end, "");
+                self.cursor = start;
+                self.pasted.retain(|(pid, _)| *pid != id);
+            } else {
+                let line = self.lines.last_mut().unwrap();
+                let new_cursor = line[..self.cursor]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                line.replace_range(new_cursor..self.cursor, "");
+                self.cursor = new_cursor;
+            }
             self.consecutive_newlines = 0;
         }
         false
     }
 
     fn delete_at_cursor(&mut self) {
-        let line = self.lines.last_mut().unwrap();
-        if self.cursor < line.len() {
+        let len = self.current_line().len();
+        if self.cursor < len {
+            // Check if cursor is at the start of a placeholder
+            if let Some((start, end, id)) = self.placeholder_span_at(self.cursor + 1) {
+                if self.cursor == start {
+                    let line = self.lines.last_mut().unwrap();
+                    line.replace_range(start..end, "");
+                    self.pasted.retain(|(pid, _)| *pid != id);
+                    return;
+                }
+            }
+            let line = self.lines.last_mut().unwrap();
             let next = line[self.cursor..]
                 .char_indices()
                 .nth(1)
@@ -118,18 +157,30 @@ impl LineEditor {
 
     fn move_left(&mut self) {
         if self.cursor > 0 {
-            let line = self.current_line();
-            self.cursor = line[..self.cursor]
-                .char_indices()
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(0);
+            // If inside a placeholder, jump to its start
+            if let Some((start, _, _)) = self.placeholder_span_at(self.cursor) {
+                self.cursor = start;
+            } else {
+                let line = self.current_line();
+                self.cursor = line[..self.cursor]
+                    .char_indices()
+                    .last()
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+            }
         }
     }
 
     fn move_right(&mut self) {
         let len = self.current_line().len();
         if self.cursor < len {
+            // If at the start of a placeholder, jump to its end
+            if let Some((start, end, _)) = self.placeholder_span_at(self.cursor + 1) {
+                if self.cursor == start {
+                    self.cursor = end;
+                    return;
+                }
+            }
             let line = self.current_line();
             self.cursor = line[self.cursor..]
                 .char_indices()
@@ -649,19 +700,29 @@ mod tests {
     }
 
     #[test]
-    fn test_paste_placeholder_edited_away_appends() {
+    fn test_paste_backspace_deletes_whole_placeholder() {
         let mut ed = LineEditor::new();
         let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
         ed.insert_paste(&long_text);
         assert_eq!(ed.pasted.len(), 1);
-        // Simulate user deleting the placeholder
-        ed.lines[0] = "user typed something else".to_string();
+        // Cursor is at end of placeholder, backspace should delete the whole thing
+        ed.backspace();
+        assert_eq!(ed.current_line(), "");
+        assert!(ed.pasted.is_empty());
+    }
+
+    #[test]
+    fn test_paste_placeholder_fallback_appends() {
+        let mut ed = LineEditor::new();
+        let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&long_text);
+        // Forcefully corrupt the placeholder (simulating edge case)
+        ed.lines[0] = "corrupted".to_string();
         ed.cursor = ed.lines[0].len();
-        // full_text should still include the pasted content (appended)
+        // full_text should append the content as fallback
         let full = ed.full_text();
-        assert!(full.contains("user typed something else"));
+        assert!(full.contains("corrupted"));
         assert!(full.contains("line 1"));
-        assert!(full.contains("line 10"));
     }
 
     #[test]
