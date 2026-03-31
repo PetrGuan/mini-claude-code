@@ -22,17 +22,17 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let api_key = match auth::get_api_key() {
-        Ok(key) => key,
-        Err(msg) => {
-            eprintln!("{}", msg);
+    let auth = match auth::get_auth() {
+        Ok(auth) => auth,
+        Err(e) => {
+            eprintln!("Authentication failed: {}", e);
             std::process::exit(1);
         }
     };
 
     let cwd = std::env::current_dir()?.display().to_string();
 
-    let mut client = api::client::AnthropicClient::new(api_key, cli.model, cli.max_tokens);
+    let mut client = api::client::AnthropicClient::new(auth, cli.model, cli.max_tokens);
     client.set_system_prompt(format!(
         "You are a helpful coding assistant running in the terminal.\n\
          Working directory: {}\n\

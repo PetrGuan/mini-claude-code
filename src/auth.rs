@@ -1,58 +1,90 @@
+use anyhow::{anyhow, Result};
+use serde::Deserialize;
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::process::Command;
 
-/// Try to get the API key from multiple sources, in order:
+const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const OAUTH_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
+const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
+const OAUTH_SCOPES: &str = "user:profile user:inference";
+
+#[derive(Debug, Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    #[allow(dead_code)]
+    refresh_token: Option<String>,
+    #[allow(dead_code)]
+    expires_in: Option<u64>,
+}
+
+/// Authentication result — either an API key or an OAuth token
+pub struct AuthResult {
+    pub api_key: Option<String>,
+    pub oauth_token: Option<String>,
+}
+
+impl AuthResult {
+    /// Get the appropriate auth headers for the Anthropic API
+    pub fn auth_headers(&self) -> Vec<(String, String)> {
+        if let Some(ref token) = self.oauth_token {
+            vec![
+                ("Authorization".into(), format!("Bearer {}", token)),
+                ("anthropic-beta".into(), "oauth-2025-04-20".into()),
+            ]
+        } else if let Some(ref key) = self.api_key {
+            vec![("x-api-key".into(), key.clone())]
+        } else {
+            vec![]
+        }
+    }
+}
+
+/// Try to get credentials from multiple sources, in order:
 /// 1. ANTHROPIC_API_KEY environment variable
-/// 2. macOS Keychain ("Claude Code" service)
-/// 3. ~/.claude/.credentials file
-pub fn get_api_key() -> Result<String, String> {
+/// 2. macOS Keychain (Claude Code stored credentials)
+/// 3. ~/.claude/.credentials.json file
+/// 4. Interactive OAuth login
+pub fn get_auth() -> Result<AuthResult> {
     // 1. Environment variable
     if let Ok(key) = std::env::var("ANTHROPIC_API_KEY") {
         if !key.is_empty() {
-            return Ok(key);
+            return Ok(AuthResult {
+                api_key: Some(key),
+                oauth_token: None,
+            });
         }
     }
 
-    // 2. macOS Keychain
-    if let Some(key) = read_from_keychain() {
-        return Ok(key);
+    // 2. macOS Keychain — try OAuth tokens from "Claude Code-credentials"
+    if let Some(token) = read_oauth_from_keychain() {
+        return Ok(AuthResult {
+            api_key: None,
+            oauth_token: Some(token),
+        });
     }
 
     // 3. Credentials file
-    if let Some(key) = read_from_credentials_file() {
-        return Ok(key);
+    if let Some(result) = read_from_credentials_file() {
+        return Ok(result);
     }
 
-    Err(
-        "No API key found. Either:\n  \
-         - Set ANTHROPIC_API_KEY environment variable\n  \
-         - Login via Claude Code (`claude` CLI → /login)\n  \
-         - Place your key in ~/.claude/.credentials.json"
-            .to_string(),
-    )
+    // 4. Interactive OAuth login
+    eprintln!("No credentials found. Starting OAuth login...");
+    let token = oauth_login()?;
+    Ok(AuthResult {
+        api_key: None,
+        oauth_token: Some(token),
+    })
 }
 
-/// Read API key or OAuth token from macOS Keychain.
-/// Claude Code stores credentials under the "Claude Code" service.
-fn read_from_keychain() -> Option<String> {
-    let username = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .ok()?;
+/// Read OAuth access token from macOS Keychain (hex-encoded JSON)
+fn read_oauth_from_keychain() -> Option<String> {
+    let username = std::env::var("USER").ok()?;
 
-    // Try "Claude Code" service first (stores API key directly)
-    if let Some(value) = keychain_find("Claude Code", &username) {
-        // Could be a plain API key or hex-encoded JSON
-        if value.starts_with("sk-") {
-            return Some(value);
-        }
-        // Try hex-decode as JSON (OAuth token storage format)
-        if let Some(token) = parse_hex_credentials(&value) {
-            return Some(token);
-        }
-    }
-
-    // Try "Claude Code-credentials" service (hex-encoded JSON with OAuth tokens)
-    if let Some(value) = keychain_find("Claude Code-credentials", &username) {
-        if let Some(token) = parse_hex_credentials(&value) {
+    // Try "Claude Code-credentials" (OAuth token storage)
+    if let Some(hex_value) = keychain_find("Claude Code-credentials", &username) {
+        if let Some(token) = parse_hex_oauth_token(&hex_value) {
             return Some(token);
         }
     }
@@ -77,15 +109,14 @@ fn keychain_find(service: &str, account: &str) -> Option<String> {
 
     let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if value.is_empty() {
-        return None;
+        None
+    } else {
+        Some(value)
     }
-
-    Some(value)
 }
 
-/// Parse hex-encoded JSON credentials and extract the OAuth access token.
-/// Claude Code stores: hex(JSON({ claudeAiOauth: { accessToken, ... } }))
-fn parse_hex_credentials(hex_str: &str) -> Option<String> {
+/// Parse hex-encoded JSON credentials and extract the OAuth access token
+fn parse_hex_oauth_token(hex_str: &str) -> Option<String> {
     let bytes = hex::decode(hex_str.trim()).ok()?;
     let json_str = String::from_utf8(bytes).ok()?;
     let json: serde_json::Value = serde_json::from_str(&json_str).ok()?;
@@ -96,26 +127,202 @@ fn parse_hex_credentials(hex_str: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Read credentials from ~/.claude/.credentials.json (plaintext fallback)
-fn read_from_credentials_file() -> Option<String> {
+/// Read credentials from ~/.claude/.credentials.json
+fn read_from_credentials_file() -> Option<AuthResult> {
     let home = std::env::var("HOME").ok()?;
     let path = format!("{}/.claude/.credentials.json", home);
     let content = std::fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    // Try OAuth token
+    // Try OAuth token first
     if let Some(token) = json
         .get("claudeAiOauth")
         .and_then(|o| o.get("accessToken"))
         .and_then(|v| v.as_str())
     {
-        return Some(token.to_string());
+        return Some(AuthResult {
+            api_key: None,
+            oauth_token: Some(token.to_string()),
+        });
     }
 
     // Try plain API key
-    json.get("apiKey")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    if let Some(key) = json.get("apiKey").and_then(|v| v.as_str()) {
+        return Some(AuthResult {
+            api_key: Some(key.to_string()),
+            oauth_token: None,
+        });
+    }
+
+    None
+}
+
+/// Perform interactive OAuth login (PKCE flow)
+fn oauth_login() -> Result<String> {
+    // Generate PKCE code verifier and challenge
+    let code_verifier = generate_random_string(32);
+    let code_challenge = sha256_base64url(&code_verifier);
+    let state = generate_random_string(32);
+
+    // Start local HTTP server for callback
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    let redirect_uri = format!("http://localhost:{}/callback", port);
+
+    // Build authorization URL
+    let auth_url = format!(
+        "{}?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
+        OAUTH_AUTHORIZE_URL,
+        OAUTH_CLIENT_ID,
+        urlencoding::encode(&redirect_uri),
+        urlencoding::encode(OAUTH_SCOPES),
+        code_challenge,
+        state
+    );
+
+    // Open browser
+    eprintln!("Opening browser for login...");
+    eprintln!("If it doesn't open, visit:\n{}\n", auth_url);
+    let _ = Command::new("open").arg(&auth_url).spawn();
+
+    // Wait for callback
+    eprintln!("Waiting for authentication...");
+    let (auth_code, received_state) = wait_for_callback(&listener)?;
+
+    if received_state != state {
+        return Err(anyhow!("OAuth state mismatch — possible CSRF attack"));
+    }
+
+    // Exchange code for token
+    let token = exchange_code_for_token(&auth_code, &redirect_uri, &code_verifier)?;
+    eprintln!("Login successful!\n");
+
+    Ok(token)
+}
+
+fn wait_for_callback(listener: &TcpListener) -> Result<(String, String)> {
+    let (mut stream, _) = listener.accept()?;
+    let reader = BufReader::new(&stream);
+
+    let request_line = reader
+        .lines()
+        .next()
+        .ok_or_else(|| anyhow!("No request received"))??;
+
+    // Parse "GET /callback?code=xxx&state=yyy HTTP/1.1"
+    let url_part = request_line
+        .split_whitespace()
+        .nth(1)
+        .ok_or_else(|| anyhow!("Invalid request"))?;
+
+    let query = url_part
+        .split('?')
+        .nth(1)
+        .ok_or_else(|| anyhow!("No query parameters"))?;
+
+    let mut code = None;
+    let mut state = None;
+
+    for param in query.split('&') {
+        let mut parts = param.splitn(2, '=');
+        match (parts.next(), parts.next()) {
+            (Some("code"), Some(v)) => code = Some(urlencoding::decode(v)?.into_owned()),
+            (Some("state"), Some(v)) => state = Some(urlencoding::decode(v)?.into_owned()),
+            _ => {}
+        }
+    }
+
+    // Send response to browser
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n\
+        <html><body><h2>Login successful!</h2><p>You can close this tab and return to the terminal.</p></body></html>";
+    stream.write_all(response.as_bytes())?;
+
+    Ok((
+        code.ok_or_else(|| anyhow!("No authorization code received"))?,
+        state.ok_or_else(|| anyhow!("No state received"))?,
+    ))
+}
+
+fn exchange_code_for_token(
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<String> {
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": OAUTH_CLIENT_ID,
+        "code_verifier": code_verifier,
+    });
+
+    // Use blocking reqwest since this is called during init
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post(OAUTH_TOKEN_URL)
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().unwrap_or_default();
+        return Err(anyhow!("Token exchange failed ({}): {}", status, text));
+    }
+
+    let token_response: TokenResponse = response.json()?;
+    Ok(token_response.access_token)
+}
+
+fn generate_random_string(len: usize) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // Simple random using time + pid as seed (good enough for PKCE)
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+        ^ (std::process::id() as u128);
+
+    let mut bytes = Vec::with_capacity(len);
+    let mut state = seed;
+    for _ in 0..len {
+        state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+        bytes.push((state >> 33) as u8);
+    }
+
+    base64url_encode(&bytes)
+}
+
+fn sha256_base64url(input: &str) -> String {
+    use std::io::Read;
+    // Use openssl command for SHA256 (available on macOS)
+    let output = Command::new("openssl")
+        .arg("dgst")
+        .arg("-sha256")
+        .arg("-binary")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let mut buf = Vec::new();
+            child.stdout.take().unwrap().read_to_end(&mut buf).unwrap();
+            child.wait()?;
+            Ok(buf)
+        })
+        .expect("Failed to run openssl");
+
+    base64url_encode(&output)
+}
+
+fn base64url_encode(data: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(data)
 }
 
 #[cfg(test)]
@@ -123,17 +330,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_hex_credentials() {
-        // JSON: {"claudeAiOauth":{"accessToken":"test-token-123"}}
+    fn test_parse_hex_oauth_token() {
         let json = r#"{"claudeAiOauth":{"accessToken":"test-token-123"}}"#;
         let hex = hex::encode(json.as_bytes());
-        let result = parse_hex_credentials(&hex);
-        assert_eq!(result, Some("test-token-123".to_string()));
+        assert_eq!(parse_hex_oauth_token(&hex), Some("test-token-123".to_string()));
     }
 
     #[test]
-    fn test_parse_hex_credentials_invalid() {
-        assert_eq!(parse_hex_credentials("not-hex"), None);
-        assert_eq!(parse_hex_credentials(""), None);
+    fn test_parse_hex_invalid() {
+        assert_eq!(parse_hex_oauth_token("not-hex"), None);
+        assert_eq!(parse_hex_oauth_token(""), None);
+    }
+
+    #[test]
+    fn test_base64url_encode() {
+        let result = base64url_encode(b"hello");
+        assert_eq!(result, "aGVsbG8");
+    }
+
+    #[test]
+    fn test_generate_random_string() {
+        let s1 = generate_random_string(32);
+        let s2 = generate_random_string(32);
+        assert!(!s1.is_empty());
+        // Two consecutive calls should be very likely different
+        // (not guaranteed but extremely likely with nanosecond seed)
     }
 }

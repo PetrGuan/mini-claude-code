@@ -1,5 +1,6 @@
 use crate::api::stream::{parse_sse_stream, SseEvent};
 use crate::api::types::{CreateMessageRequest, Message, ToolDefinition};
+use crate::auth::AuthResult;
 use anyhow::{anyhow, Result};
 use reqwest::Client;
 use tokio::sync::mpsc;
@@ -9,17 +10,17 @@ const API_VERSION: &str = "2023-06-01";
 
 pub struct AnthropicClient {
     client: Client,
-    api_key: String,
+    auth: AuthResult,
     pub model: String,
     pub max_tokens: u32,
     pub system_prompt: Option<String>,
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: String, model: String, max_tokens: u32) -> Self {
+    pub fn new(auth: AuthResult, model: String, max_tokens: u32) -> Self {
         Self {
             client: Client::new(),
-            api_key,
+            auth,
             model,
             max_tokens,
             system_prompt: None,
@@ -45,15 +46,18 @@ impl AnthropicClient {
             stream: true,
         };
 
-        let response = self
+        let mut req_builder = self
             .client
             .post(API_URL)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", API_VERSION)
-            .header("content-type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+            .header("content-type", "application/json");
+
+        // Apply auth headers (API key or OAuth token)
+        for (key, value) in self.auth.auth_headers() {
+            req_builder = req_builder.header(&key, &value);
+        }
+
+        let response = req_builder.json(&request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
