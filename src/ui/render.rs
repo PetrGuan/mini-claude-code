@@ -1,9 +1,10 @@
 use std::io::{self, Write};
 use termimad::MadSkin;
 
-/// Print a chunk of streaming text directly to stdout (no formatting).
+/// Print a chunk of streaming text in dim color (indicates "generating").
+/// The text will be re-rendered with full markdown after streaming completes.
 pub fn print_stream_chunk(text: &str) {
-    print!("{}", text);
+    print!("\x1b[2m{}\x1b[0m", text);
     io::stdout().flush().ok();
 }
 
