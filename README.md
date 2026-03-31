@@ -2,29 +2,29 @@
 
 A minimal [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI rebuilt from scratch in Rust. Interactive AI coding assistant in your terminal — chat with Claude, run commands, read/write/edit files, and search your codebase.
 
-Built as a learning project by studying the [leaked Claude Code source](https://github.com/PetrGuan/claude-code), reimplementing the core in ~1,400 lines of Rust.
+Inspired by [Claude Code](https://docs.anthropic.com/en/docs/claude-code), reimplemented from scratch in ~1,400 lines of Rust.
 
 ## Demo
 
 ```
-$ mini-claude-code
+  ◆ mini-claude-code v0.1.0
+  claude-haiku-4-5-20251001 · bash, read, write, edit, glob, grep
+  Enter twice to send · Ctrl+C to exit
 
-mini-claude-code v0.1.0
-Model: claude-haiku-4-5-20251001
-Type your message (press Enter twice to send, Ctrl+C to exit)
+  ◇ What files are in the src directory?
 
-> What files are in the src directory?
+  ◆ Claude
 
-[Tool: glob]
-  Executing glob...
+  [glob: *.rs in src/]
+  ✓ src/main.rs
+    src/repl.rs
+    src/auth.rs
+    ...
 
-Here are the files in src/:
-- src/main.rs — CLI entry point
-- src/repl.rs — REPL loop
-- src/auth.rs — Authentication (OAuth + API key)
-- src/api/ — Anthropic API client + SSE streaming
-- src/tools/ — 6 developer tools
-- src/ui/ — Terminal input + rendering
+  Here are the source files:
+  ● src/main.rs — CLI entry point
+  ● src/repl.rs — REPL loop
+  ● src/auth.rs — Authentication
 ```
 
 ## Features
@@ -44,7 +44,9 @@ Here are the files in src/:
 - **Smart authentication** — auto-detects API key from env, macOS Keychain, or OAuth login
 - **Streaming** — text appears in real-time as Claude generates it
 - **Tool loop** — Claude can chain multiple tool calls before responding
-- **Single binary** — 5.8 MB release build, no runtime dependencies
+- **Markdown rendering** — code blocks with syntax highlighting, bold, italic, lists
+- **Animated spinner** — visual feedback during thinking and tool execution
+- **Single binary** — ~6 MB release build, no runtime dependencies
 
 ## Install
 
@@ -120,7 +122,9 @@ src/
 │   └── grep.rs          # GrepTool (via ripgrep)
 └── ui/
     ├── input.rs         # Terminal input (raw mode + RAII guard)
-    └── render.rs        # Stream output
+    ├── render.rs        # Markdown rendering + code block formatting
+    ├── highlight.rs     # Syntax highlighting (syntect)
+    └── spinner.rs       # Animated spinner
 ```
 
 ### How it works
@@ -142,6 +146,7 @@ User input → Build messages → POST /v1/messages (stream: true)
 | JSON | serde + serde_json |
 | CLI | clap |
 | Terminal | crossterm |
+| Syntax highlighting | syntect |
 | File search | globwalk + ripgrep |
 
 ## What's NOT included (vs Claude Code)
@@ -157,7 +162,6 @@ This is intentionally minimal. Not included:
 - Conversation history persistence
 - Cost tracking
 - Slash commands
-- Markdown rendering (streamed as plain text)
 
 ## Development
 
@@ -180,7 +184,7 @@ This project was built to:
 2. **Build** — produce a fast, usable CLI tool for daily development tasks
 3. **Explore Rust** — practice Rust with a real-world async + CLI project
 
-The original Claude Code is ~512K lines of TypeScript. This is ~1,400 lines of Rust doing the essential 20%.
+Claude Code is ~512K lines of TypeScript. This is ~1,400 lines of Rust doing the essential 20%.
 
 ## License
 
