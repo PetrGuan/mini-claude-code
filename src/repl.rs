@@ -9,6 +9,7 @@ use crate::ui::render::{
     count_display_lines, print_response_header, print_separator, print_stream_chunk,
     render_final_response,
 };
+use crate::ui::spinner::Spinner;
 use anyhow::Result;
 
 /// Max characters to store per tool result in conversation history
@@ -131,20 +132,16 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
 
         // Tool use loop: keep calling API until model stops using tools
         loop {
-            // Show thinking indicator
-            print!("\n\x1b[2m  Thinking...\x1b[0m");
-            std::io::Write::flush(&mut std::io::stdout()).ok();
+            // Show animated spinner while waiting for API
+            let spinner = Spinner::start("Thinking...");
 
-            // API errors are non-fatal — display and return to prompt
             let mut rx = match client.send_message_stream(&messages, &tool_defs).await {
                 Ok(rx) => {
-                    // Clear "Thinking..." line
-                    print!("\r\x1b[K");
-                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                    drop(spinner);
                     rx
                 }
                 Err(e) => {
-                    print!("\r\x1b[K");
+                    drop(spinner);
                     eprintln!("\x1b[1;31m  API Error: {}\x1b[0m\n", e);
                     messages.pop();
                     break;
@@ -300,8 +297,10 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
 
                 match registry.get(name) {
                     Some(tool) => {
+                        let tool_spinner = Spinner::start(&format!("Running {}...", name));
                         match tool.execute(input.clone()).await {
                             Ok(result) => {
+                                drop(tool_spinner);
                                 println!("{}", format_tool_preview(&result.content, result.is_error));
                                 let stored_content =
                                     truncate_utf8(&result.content, MAX_TOOL_RESULT_CHARS);
@@ -312,6 +311,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                                 });
                             }
                             Err(e) => {
+                                drop(tool_spinner);
                                 println!("  \x1b[31m✗ Error: {}\x1b[0m", e);
                                 tool_results.push(ContentBlock::ToolResult {
                                     tool_use_id: id.clone(),

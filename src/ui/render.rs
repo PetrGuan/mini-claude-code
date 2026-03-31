@@ -1,7 +1,7 @@
+use crate::ui::highlight::highlight_code;
 use std::io::{self, Write};
-use termimad::MadSkin;
 
-/// Start the AI response area — print a header with the assistant label
+/// Start the AI response area
 pub fn print_response_header() {
     println!("\x1b[1;36m  ◆ Claude\x1b[0m");
     println!();
@@ -13,8 +13,8 @@ pub fn print_stream_chunk(text: &str) {
     io::stdout().flush().ok();
 }
 
-/// After streaming completes, render the full response with markdown.
-/// This replaces the raw streamed text with a formatted version.
+/// After streaming completes, render the full response with formatting.
+/// Clears the raw streamed text, then reprints with syntax-highlighted code blocks.
 pub fn render_final_response(raw_text: &str, lines_to_clear: usize) {
     // Move cursor up to overwrite raw streamed text
     for _ in 0..lines_to_clear {
@@ -23,9 +23,10 @@ pub fn render_final_response(raw_text: &str, lines_to_clear: usize) {
     print!("\x1b[2K\r");
     io::stdout().flush().ok();
 
-    // Render with termimad
-    let skin = create_skin();
-    skin.print_text(raw_text);
+    // Render with our custom markdown formatter
+    let rendered = render_markdown(raw_text);
+    print!("{}", rendered);
+    io::stdout().flush().ok();
     println!();
 }
 
@@ -36,7 +37,7 @@ pub fn count_display_lines(text: &str) -> usize {
         .unwrap_or(80);
     let mut count = 0;
     for line in text.split('\n') {
-        let visible_len = strip_ansi_len(line);
+        let visible_len = visible_char_count(line);
         if visible_len == 0 {
             count += 1;
         } else {
@@ -46,8 +47,181 @@ pub fn count_display_lines(text: &str) -> usize {
     count.max(1)
 }
 
-/// Get the visible length of a string (excluding ANSI escape codes)
-fn strip_ansi_len(s: &str) -> usize {
+/// Print a horizontal separator between conversation turns
+pub fn print_separator() {
+    let width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+    println!("\x1b[2m{}\x1b[0m", "─".repeat(width.min(60)));
+}
+
+/// Render markdown text with syntax-highlighted code blocks and basic formatting.
+fn render_markdown(text: &str) -> String {
+    let mut output = String::new();
+    let mut in_code_block = false;
+    let mut code_lang = String::new();
+    let mut code_content = String::new();
+
+    for line in text.lines() {
+        if line.starts_with("```") {
+            if in_code_block {
+                // End of code block — render with syntax highlighting
+                output.push_str(&render_code_block(&code_content, &code_lang));
+                code_content.clear();
+                code_lang.clear();
+                in_code_block = false;
+            } else {
+                // Start of code block
+                code_lang = line.trim_start_matches('`').trim().to_string();
+                in_code_block = true;
+            }
+        } else if in_code_block {
+            if !code_content.is_empty() {
+                code_content.push('\n');
+            }
+            code_content.push_str(line);
+        } else {
+            // Regular text — apply inline formatting
+            output.push_str(&render_text_line(line));
+            output.push('\n');
+        }
+    }
+
+    // Handle unclosed code block
+    if in_code_block && !code_content.is_empty() {
+        output.push_str(&render_code_block(&code_content, &code_lang));
+    }
+
+    output
+}
+
+/// Render a code block with syntax highlighting and a visual frame
+fn render_code_block(code: &str, lang: &str) -> String {
+    let term_width = crossterm::terminal::size()
+        .map(|(w, _)| w as usize)
+        .unwrap_or(80);
+    let block_width = term_width.min(80);
+
+    let mut output = String::new();
+
+    // Top border with language label
+    let label = if lang.is_empty() {
+        String::new()
+    } else {
+        format!(" {} ", lang)
+    };
+    let border_len = block_width.saturating_sub(label.len() + 2);
+    output.push_str(&format!(
+        "\x1b[2m  ╭{}{}\x1b[0m\n",
+        label,
+        "─".repeat(border_len)
+    ));
+
+    // Highlighted code lines
+    let highlighted = highlight_code(code, lang);
+    for line in highlighted.lines() {
+        output.push_str(&format!("\x1b[2m  │\x1b[0m {}\n", line));
+    }
+
+    // Bottom border
+    output.push_str(&format!(
+        "\x1b[2m  ╰{}\x1b[0m\n",
+        "─".repeat(block_width)
+    ));
+
+    output
+}
+
+/// Apply inline formatting to a text line
+fn render_text_line(line: &str) -> String {
+    // Headers
+    if line.starts_with("### ") {
+        return format!("\x1b[1;37m{}\x1b[0m", &line[4..]);
+    }
+    if line.starts_with("## ") {
+        return format!("\x1b[1;37m{}\x1b[0m", &line[3..]);
+    }
+    if line.starts_with("# ") {
+        return format!("\x1b[1;36m{}\x1b[0m", &line[2..]);
+    }
+
+    // Bullet points
+    if line.starts_with("- ") || line.starts_with("* ") {
+        return format!("  \x1b[36m●\x1b[0m {}", render_inline(&line[2..]));
+    }
+    // Numbered lists
+    if line.len() > 2 && line.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if let Some(rest) = line.split_once(". ") {
+            return format!("  \x1b[36m{}.\x1b[0m {}", rest.0, render_inline(rest.1));
+        }
+    }
+
+    render_inline(line)
+}
+
+/// Apply inline formatting: **bold**, *italic*, `code`
+fn render_inline(text: &str) -> String {
+    let mut result = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Inline code: `...`
+        if chars[i] == '`' {
+            if let Some(end) = find_closing(&chars, i + 1, '`') {
+                let code: String = chars[i + 1..end].iter().collect();
+                result.push_str(&format!("\x1b[48;5;236m\x1b[38;5;216m {}\x1b[0m", code));
+                i = end + 1;
+                continue;
+            }
+        }
+        // Bold: **...**
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            if let Some(end) = find_double_closing(&chars, i + 2, '*') {
+                let bold: String = chars[i + 2..end].iter().collect();
+                result.push_str(&format!("\x1b[1m{}\x1b[0m", bold));
+                i = end + 2;
+                continue;
+            }
+        }
+        // Italic: *...*
+        if chars[i] == '*' && (i + 1 < len && chars[i + 1] != '*') {
+            if let Some(end) = find_closing(&chars, i + 1, '*') {
+                let italic: String = chars[i + 1..end].iter().collect();
+                result.push_str(&format!("\x1b[3m{}\x1b[0m", italic));
+                i = end + 1;
+                continue;
+            }
+        }
+
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    result
+}
+
+fn find_closing(chars: &[char], start: usize, marker: char) -> Option<usize> {
+    for i in start..chars.len() {
+        if chars[i] == marker {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_double_closing(chars: &[char], start: usize, marker: char) -> Option<usize> {
+    for i in start..chars.len() - 1 {
+        if chars[i] == marker && chars[i + 1] == marker {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Get the visible character count (excluding ANSI escape codes)
+fn visible_char_count(s: &str) -> usize {
     let mut len = 0;
     let mut in_escape = false;
     for c in s.chars() {
@@ -62,49 +236,4 @@ fn strip_ansi_len(s: &str) -> usize {
         }
     }
     len
-}
-
-fn create_skin() -> MadSkin {
-    let mut skin = MadSkin::default();
-
-    // Code blocks: dark background, stand out clearly
-    skin.code_block
-        .set_bg(termimad::crossterm::style::Color::AnsiValue(235));
-    skin.code_block
-        .set_fg(termimad::crossterm::style::Color::AnsiValue(252));
-
-    // Inline code: warm highlight
-    skin.inline_code
-        .set_fg(termimad::crossterm::style::Color::AnsiValue(216));
-    skin.inline_code
-        .set_bg(termimad::crossterm::style::Color::AnsiValue(236));
-
-    // Bold: bright
-    skin.bold
-        .set_fg(termimad::crossterm::style::Color::White);
-
-    // Italic: soft cyan
-    skin.italic
-        .set_fg(termimad::crossterm::style::Color::AnsiValue(117));
-
-    // Headers
-    skin.headers[0].set_fg(termimad::crossterm::style::Color::AnsiValue(117));
-    skin.headers[1].set_fg(termimad::crossterm::style::Color::AnsiValue(117));
-
-    // Bullet points
-    skin.bullet = termimad::StyledChar::from_fg_char(
-        termimad::crossterm::style::Color::AnsiValue(75),
-        '●',
-    );
-
-    skin
-}
-
-/// Print a horizontal separator between conversation turns
-pub fn print_separator() {
-    let width = crossterm::terminal::size()
-        .map(|(w, _)| w as usize)
-        .unwrap_or(80);
-    let line_width = width.min(60);
-    println!("\x1b[2m{}\x1b[0m", "─".repeat(line_width));
 }
