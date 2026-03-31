@@ -5,7 +5,7 @@ use crate::api::types::{
 };
 use crate::tools::ToolRegistry;
 use crate::ui::input::read_user_input;
-use crate::ui::render::print_stream_chunk;
+use crate::ui::render::{count_display_lines, print_separator, print_stream_chunk, render_markdown_response};
 use anyhow::Result;
 
 /// Max characters to store per tool result in conversation history
@@ -106,7 +106,12 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
     println!("  \x1b[2mEnter twice to send · Ctrl+C to exit\x1b[0m");
     println!();
 
+    let mut turn = 0;
     loop {
+        if turn > 0 {
+            print_separator();
+            println!();
+        }
         let input = match read_user_input() {
             Some(s) if s.is_empty() => continue,
             Some(s) => s,
@@ -116,6 +121,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
             }
         };
 
+        turn += 1;
         messages.push(Message {
             role: Role::User,
             content: vec![ContentBlock::Text { text: input }],
@@ -150,6 +156,8 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
             let mut current_tool_input_json = String::new();
             let mut stream_error = false;
             let mut first_text = true;
+            let mut streamed_lines = 0;
+            let mut has_text_content = false;
 
             while let Some(event_result) = rx.recv().await {
                 let sse_event = match event_result {
@@ -189,6 +197,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                             DeltaData::TextDelta { text } => {
                                 print_stream_chunk(&text);
                                 current_text.push_str(&text);
+                                has_text_content = true;
                             }
                             DeltaData::InputJsonDelta { partial_json } => {
                                 current_tool_input_json.push_str(&partial_json);
@@ -226,7 +235,26 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                 }
             }
 
-            println!();
+            // Re-render text with markdown formatting
+            if has_text_content && !stream_error {
+                // Collect all text from this response
+                let full_text: String = assistant_content
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .chain(if !current_text.is_empty() { Some(current_text.as_str()) } else { None })
+                    .collect::<Vec<_>>()
+                    .join("");
+
+                if !full_text.is_empty() {
+                    streamed_lines = count_display_lines(&full_text);
+                    render_markdown_response(&full_text, streamed_lines);
+                }
+            } else {
+                println!();
+            }
 
             if stream_error {
                 messages.pop();
