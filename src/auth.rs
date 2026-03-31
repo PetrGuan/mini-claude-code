@@ -187,8 +187,9 @@ fn oauth_login() -> Result<String> {
     let redirect_uri = format!("http://localhost:{}/callback", port);
 
     // Use Console authorize URL (works for both Console and Claude.ai users)
+    // The `code=true` param matches Claude Code's behavior
     let auth_url = format!(
-        "https://platform.claude.com/oauth/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
+        "https://platform.claude.com/oauth/authorize?code=true&client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
         OAUTH_CLIENT_ID,
         urlencoding::encode(&redirect_uri),
         urlencoding::encode(OAUTH_SCOPES),
@@ -210,7 +211,7 @@ fn oauth_login() -> Result<String> {
     }
 
     // Exchange code for token
-    let access_token = exchange_code_for_token(&auth_code, &redirect_uri, &code_verifier)?;
+    let access_token = exchange_code_for_token(&auth_code, &redirect_uri, &code_verifier, &state)?;
     eprintln!("OAuth token acquired. Creating API key...");
 
     // Try to create an API key via the Console endpoint
@@ -302,19 +303,22 @@ fn exchange_code_for_token(
     code: &str,
     redirect_uri: &str,
     code_verifier: &str,
+    state: &str,
 ) -> Result<String> {
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", OAUTH_CLIENT_ID),
-        ("code_verifier", code_verifier),
-    ];
+    let body = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": OAUTH_CLIENT_ID,
+        "code_verifier": code_verifier,
+        "state": state,
+    });
 
     let client = reqwest::blocking::Client::new();
     let response = client
         .post(OAUTH_TOKEN_URL)
-        .form(&params)
+        .header("Content-Type", "application/json")
+        .json(&body)
         .send()?;
 
     if !response.status().is_success() {
