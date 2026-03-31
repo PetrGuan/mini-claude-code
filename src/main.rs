@@ -1,3 +1,8 @@
+mod api;
+mod tools;
+mod ui;
+mod repl;
+
 use clap::Parser;
 
 #[derive(Parser)]
