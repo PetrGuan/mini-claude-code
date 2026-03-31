@@ -55,7 +55,8 @@ pub struct ToolDefinition {
 }
 
 // === Streaming Event Types ===
-
+// Fields below are required for serde deserialization but not all are read directly.
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
@@ -90,6 +91,7 @@ pub enum StreamEvent {
     Error { error: ApiError },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct MessageStartData {
     pub id: String,
@@ -116,6 +118,7 @@ pub enum DeltaData {
     InputJsonDelta { partial_json: String },
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 pub struct MessageDeltaData {
     pub stop_reason: Option<String>,
@@ -124,6 +127,7 @@ pub struct MessageDeltaData {
 #[derive(Debug, Deserialize)]
 pub struct ApiError {
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub error_type: String,
     pub message: String,
 }

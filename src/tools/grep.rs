@@ -1,9 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio::process::Command;
 
 use crate::tools::{Tool, ToolResult};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct GrepTool;
 
@@ -63,7 +66,18 @@ impl Tool for GrepTool {
 
         cmd.arg(pattern).arg(path);
 
-        let output = cmd.output().await?;
+        let output = match tokio::time::timeout(COMMAND_TIMEOUT, cmd.output()).await {
+            Ok(result) => result?,
+            Err(_) => {
+                return Ok(ToolResult {
+                    content: format!(
+                        "Error: grep timed out after {} seconds",
+                        COMMAND_TIMEOUT.as_secs()
+                    ),
+                    is_error: true,
+                });
+            }
+        };
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // rg exits with 1 when no matches found (not an error)

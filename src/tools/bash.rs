@@ -1,9 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde_json::{json, Value};
+use std::time::Duration;
 use tokio::process::Command;
 
 use crate::tools::{Tool, ToolResult};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct BashTool;
 
@@ -41,11 +44,23 @@ impl Tool for BashTool {
             }
         };
 
-        let output = Command::new("bash")
-            .arg("-c")
-            .arg(command)
-            .output()
-            .await?;
+        let output = match tokio::time::timeout(
+            COMMAND_TIMEOUT,
+            Command::new("bash").arg("-c").arg(command).output(),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                return Ok(ToolResult {
+                    content: format!(
+                        "Error: command timed out after {} seconds",
+                        COMMAND_TIMEOUT.as_secs()
+                    ),
+                    is_error: true,
+                });
+            }
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);

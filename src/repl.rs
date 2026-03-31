@@ -1,13 +1,27 @@
 use crate::api::client::AnthropicClient;
 use crate::api::stream::SseEvent;
-use crate::api::types::{ContentBlock, ContentBlockStartData, DeltaData, Message, Role, StreamEvent};
+use crate::api::types::{
+    ContentBlock, ContentBlockStartData, DeltaData, Message, Role, StreamEvent,
+};
 use crate::tools::ToolRegistry;
 use crate::ui::input::read_user_input;
-use crate::ui::render::{create_skin, print_stream_chunk};
+use crate::ui::render::print_stream_chunk;
 use anyhow::Result;
 
+/// Max characters to store per tool result in conversation history (I3)
+const MAX_TOOL_RESULT_CHARS: usize = 40_000;
+
+/// Truncate a string at a UTF-8 safe boundary (C1)
+fn truncate_utf8(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let truncated: String = s.chars().take(max_chars).collect();
+        format!("{}...", truncated)
+    }
+}
+
 pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()> {
-    let _skin = create_skin();
     let mut messages: Vec<Message> = Vec::new();
     let tool_defs = registry.definitions();
 
@@ -32,18 +46,38 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
 
         // Tool use loop: keep calling API until model stops using tools
         loop {
-            let mut rx = client.send_message_stream(&messages, &tool_defs).await?;
+            // I4: API errors are non-fatal — display and return to prompt
+            let mut rx = match client.send_message_stream(&messages, &tool_defs).await {
+                Ok(rx) => rx,
+                Err(e) => {
+                    eprintln!("\n\x1b[1;31mAPI Error: {}\x1b[0m", e);
+                    // Remove the last user message so user can retry
+                    messages.pop();
+                    break;
+                }
+            };
 
             let mut assistant_content: Vec<ContentBlock> = Vec::new();
             let mut current_text = String::new();
             let mut current_tool_id = String::new();
             let mut current_tool_name = String::new();
             let mut current_tool_input_json = String::new();
+            let mut stream_error = false;
 
             println!();
 
             while let Some(event_result) = rx.recv().await {
-                match event_result? {
+                // I4: Stream errors are non-fatal
+                let sse_event = match event_result {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        eprintln!("\n\x1b[1;31mStream error: {}\x1b[0m", e);
+                        stream_error = true;
+                        break;
+                    }
+                };
+
+                match sse_event {
                     SseEvent::Event(event) => match event {
                         StreamEvent::ContentBlockStart { content_block, .. } => {
                             match content_block {
@@ -97,6 +131,8 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                         StreamEvent::MessageStart { .. } => {}
                         StreamEvent::Error { error } => {
                             eprintln!("\n\x1b[1;31mAPI Error: {}\x1b[0m", error.message);
+                            stream_error = true;
+                            break;
                         }
                     },
                     SseEvent::Done => break,
@@ -104,6 +140,12 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
             }
 
             println!();
+
+            // If stream errored, drop partial response and return to prompt
+            if stream_error {
+                messages.pop(); // remove the user message that caused the error
+                break;
+            }
 
             messages.push(Message {
                 role: Role::Assistant,
@@ -131,15 +173,14 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                         println!("\x1b[2m  Executing {}...\x1b[0m", name);
                         match tool.execute(input.clone()).await {
                             Ok(result) => {
-                                let preview = if result.content.len() > 200 {
-                                    format!("{}...", &result.content[..200])
-                                } else {
-                                    result.content.clone()
-                                };
+                                let preview = truncate_utf8(&result.content, 200);
                                 println!("\x1b[2m  Result: {}\x1b[0m", preview);
+                                // I3: Truncate large tool results before storing in history
+                                let stored_content =
+                                    truncate_utf8(&result.content, MAX_TOOL_RESULT_CHARS);
                                 tool_results.push(ContentBlock::ToolResult {
                                     tool_use_id: id.clone(),
-                                    content: result.content,
+                                    content: stored_content,
                                     is_error: if result.is_error { Some(true) } else { None },
                                 });
                             }
@@ -170,4 +211,27 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_truncate_utf8_ascii() {
+        let s = "hello world";
+        assert_eq!(truncate_utf8(s, 5), "hello...");
+    }
+
+    #[test]
+    fn test_truncate_utf8_no_truncation() {
+        let s = "hello";
+        assert_eq!(truncate_utf8(s, 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_multibyte() {
+        let s = "你好世界测试";
+        assert_eq!(truncate_utf8(s, 4), "你好世界...");
+    }
 }
