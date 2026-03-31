@@ -63,12 +63,9 @@ pub fn get_auth() -> Result<AuthResult> {
         }
     }
 
-    // 2. macOS Keychain — try OAuth tokens from "Claude Code-credentials"
-    if let Some(token) = read_oauth_from_keychain() {
-        return Ok(AuthResult {
-            api_key: None,
-            oauth_token: Some(token),
-        });
+    // 2. macOS Keychain (mini-claude-code cached key, or Claude Code OAuth tokens)
+    if let Some(result) = read_from_keychain() {
+        return Ok(result);
     }
 
     // 3. Credentials file
@@ -79,8 +76,9 @@ pub fn get_auth() -> Result<AuthResult> {
     // 4. Interactive OAuth login
     eprintln!("No credentials found. Starting OAuth login...");
     let credential = oauth_login()?;
-    // If it looks like an API key, use it as such; otherwise treat as OAuth token
+    // If it looks like an API key, cache it in keychain for next time
     if credential.starts_with("sk-") {
+        save_to_keychain(&credential);
         Ok(AuthResult {
             api_key: Some(credential),
             oauth_token: None,
@@ -93,18 +91,49 @@ pub fn get_auth() -> Result<AuthResult> {
     }
 }
 
-/// Read OAuth access token from macOS Keychain (hex-encoded JSON)
-fn read_oauth_from_keychain() -> Option<String> {
+const KEYCHAIN_SERVICE: &str = "mini-claude-code";
+
+/// Read cached API key from mini-claude-code's own keychain entry,
+/// or OAuth tokens from Claude Code's keychain entry.
+fn read_from_keychain() -> Option<AuthResult> {
     let username = std::env::var("USER").ok()?;
 
-    // Try "Claude Code-credentials" (OAuth token storage)
+    // Try mini-claude-code's own cached key first
+    if let Some(key) = keychain_find(KEYCHAIN_SERVICE, &username) {
+        if key.starts_with("sk-") {
+            return Some(AuthResult {
+                api_key: Some(key),
+                oauth_token: None,
+            });
+        }
+    }
+
+    // Try Claude Code's OAuth token storage
     if let Some(hex_value) = keychain_find("Claude Code-credentials", &username) {
         if let Some(token) = parse_hex_oauth_token(&hex_value) {
-            return Some(token);
+            return Some(AuthResult {
+                api_key: None,
+                oauth_token: Some(token),
+            });
         }
     }
 
     None
+}
+
+/// Save an API key to macOS Keychain for future use
+fn save_to_keychain(api_key: &str) {
+    let username = std::env::var("USER").unwrap_or_default();
+    let _ = Command::new("security")
+        .arg("add-generic-password")
+        .arg("-U")
+        .arg("-s")
+        .arg(KEYCHAIN_SERVICE)
+        .arg("-a")
+        .arg(&username)
+        .arg("-w")
+        .arg(api_key)
+        .output();
 }
 
 fn keychain_find(service: &str, account: &str) -> Option<String> {
