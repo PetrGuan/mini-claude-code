@@ -26,6 +26,11 @@ const PROMPT: &str = "  ◇ ";
 const CONTINUATION: &str = "  . ";
 const PASTE_COLLAPSE_LINES: usize = 5;
 
+fn make_placeholder(id: usize, content: &str) -> String {
+    let line_count = content.split('\n').count();
+    format!("[Pasted#{}: {} lines]", id, line_count)
+}
+
 /// A line editor that tracks cursor position within the current line.
 struct LineEditor {
     lines: Vec<String>,
@@ -79,21 +84,16 @@ impl LineEditor {
         false
     }
 
-    /// Find the placeholder span (start, end) that contains or touches `pos`.
-    /// Returns None if pos is not inside a placeholder.
+    /// Find the placeholder span (start, end, id) that contains or touches `pos`.
+    /// pos > start && pos <= end means "inside or at the end, but not before".
     fn placeholder_span_at(&self, pos: usize) -> Option<(usize, usize, usize)> {
         let line = self.current_line();
-        for &(id, _) in &self.pasted {
-            // Reconstruct placeholder for this ID
-            // We need the line count, look it up
-            if let Some((_, content)) = self.pasted.iter().find(|(pid, _)| *pid == id) {
-                let lc = content.split('\n').count();
-                let placeholder = format!("[Pasted#{}: {} lines]", id, lc);
-                if let Some(start) = line.find(&placeholder) {
-                    let end = start + placeholder.len();
-                    if pos > start && pos <= end {
-                        return Some((start, end, id));
-                    }
+        for &(id, ref content) in &self.pasted {
+            let placeholder = make_placeholder(id, content);
+            if let Some(start) = line.find(&placeholder) {
+                let end = start + placeholder.len();
+                if pos > start && pos <= end {
+                    return Some((start, end, id));
                 }
             }
         }
@@ -199,11 +199,23 @@ impl LineEditor {
     }
 
     fn kill_to_end(&mut self) {
-        let line = self.lines.last_mut().unwrap();
-        line.truncate(self.cursor);
+        // Remove any pasted content whose placeholder is after cursor
+        let line = self.current_line().to_string();
+        let removed = &line[self.cursor..];
+        self.pasted.retain(|(id, content)| {
+            let ph = make_placeholder(*id, content);
+            !removed.contains(&ph)
+        });
+        self.lines.last_mut().unwrap().truncate(self.cursor);
     }
 
     fn clear_line(&mut self) {
+        // Remove any pasted content whose placeholder is on this line
+        let line = self.current_line().to_string();
+        self.pasted.retain(|(id, content)| {
+            let ph = make_placeholder(*id, content);
+            !line.contains(&ph)
+        });
         self.lines.last_mut().unwrap().clear();
         self.cursor = 0;
     }
@@ -243,8 +255,8 @@ impl LineEditor {
             // Store full content with unique ID, insert a placeholder
             let id = self.next_paste_id;
             self.next_paste_id += 1;
-            let placeholder = format!("[Pasted#{}: {} lines]", id, line_count);
-            self.pasted.push((id, normalized));
+            self.pasted.push((id, normalized.clone()));
+            let placeholder = make_placeholder(id, &normalized);
             for c in placeholder.chars() {
                 self.insert_char(c);
             }
@@ -272,8 +284,7 @@ impl LineEditor {
         }
         let mut result = raw;
         for (id, content) in self.pasted.iter() {
-            let line_count = content.split('\n').count();
-            let placeholder = format!("[Pasted#{}: {} lines]", id, line_count);
+            let placeholder = make_placeholder(*id, content);
             if result.contains(&placeholder) {
                 result = result.replacen(&placeholder, content, 1);
             } else {
@@ -797,5 +808,45 @@ mod tests {
         assert!(is_wide_char('好'));
         assert!(!is_wide_char('a'));
         assert!(!is_wide_char('é'));
+    }
+
+    #[test]
+    fn test_delete_at_cursor_on_placeholder() {
+        let mut ed = LineEditor::new();
+        let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&long_text);
+        // Move cursor to start of placeholder
+        ed.cursor = 0;
+        ed.delete_at_cursor();
+        assert_eq!(ed.current_line(), "");
+        assert!(ed.pasted.is_empty());
+    }
+
+    #[test]
+    fn test_move_over_placeholder() {
+        let mut ed = LineEditor::new();
+        // Type "hi", then paste long text, cursor ends after placeholder
+        ed.insert_char('h');
+        ed.insert_char('i');
+        let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&long_text);
+        let end_cursor = ed.cursor;
+        // move_left should jump to start of placeholder (pos 2, after "hi")
+        ed.move_left();
+        assert_eq!(ed.cursor, 2);
+        // move_right should jump back to end of placeholder
+        ed.move_right();
+        assert_eq!(ed.cursor, end_cursor);
+    }
+
+    #[test]
+    fn test_clear_line_removes_pasted() {
+        let mut ed = LineEditor::new();
+        let long_text = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+        ed.insert_paste(&long_text);
+        assert_eq!(ed.pasted.len(), 1);
+        ed.clear_line();
+        assert!(ed.pasted.is_empty());
+        assert_eq!(ed.current_line(), "");
     }
 }
