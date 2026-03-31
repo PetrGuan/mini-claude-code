@@ -5,9 +5,10 @@ use std::net::TcpListener;
 use std::process::Command;
 
 const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const OAUTH_AUTHORIZE_URL: &str = "https://claude.com/cai/oauth/authorize";
 const OAUTH_TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
-const OAUTH_SCOPES: &str = "user:profile user:inference";
+const CREATE_API_KEY_URL: &str = "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
+// Request all scopes so we can handle both Console and Claude.ai users
+const OAUTH_SCOPES: &str = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload";
 
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
@@ -33,7 +34,13 @@ impl AuthResult {
                 ("anthropic-beta".into(), "oauth-2025-04-20".into()),
             ]
         } else if let Some(ref key) = self.api_key {
-            vec![("x-api-key".into(), key.clone())]
+            // Claude Code managed keys need the claude-code beta header
+            let mut headers = vec![("x-api-key".into(), key.clone())];
+            headers.push((
+                "anthropic-beta".into(),
+                "claude-code-20250219".into(),
+            ));
+            headers
         } else {
             vec![]
         }
@@ -71,11 +78,19 @@ pub fn get_auth() -> Result<AuthResult> {
 
     // 4. Interactive OAuth login
     eprintln!("No credentials found. Starting OAuth login...");
-    let token = oauth_login()?;
-    Ok(AuthResult {
-        api_key: None,
-        oauth_token: Some(token),
-    })
+    let credential = oauth_login()?;
+    // If it looks like an API key, use it as such; otherwise treat as OAuth token
+    if credential.starts_with("sk-") {
+        Ok(AuthResult {
+            api_key: Some(credential),
+            oauth_token: None,
+        })
+    } else {
+        Ok(AuthResult {
+            api_key: None,
+            oauth_token: Some(credential),
+        })
+    }
 }
 
 /// Read OAuth access token from macOS Keychain (hex-encoded JSON)
@@ -158,6 +173,8 @@ fn read_from_credentials_file() -> Option<AuthResult> {
 }
 
 /// Perform interactive OAuth login (PKCE flow)
+/// For Console users: OAuth → get token → create API key
+/// For Claude.ai users: OAuth → use token directly
 fn oauth_login() -> Result<String> {
     // Generate PKCE code verifier and challenge
     let code_verifier = generate_random_string(32);
@@ -169,10 +186,9 @@ fn oauth_login() -> Result<String> {
     let port = listener.local_addr()?.port();
     let redirect_uri = format!("http://localhost:{}/callback", port);
 
-    // Build authorization URL
+    // Use Console authorize URL (works for both Console and Claude.ai users)
     let auth_url = format!(
-        "{}?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
-        OAUTH_AUTHORIZE_URL,
+        "https://platform.claude.com/oauth/authorize?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}",
         OAUTH_CLIENT_ID,
         urlencoding::encode(&redirect_uri),
         urlencoding::encode(OAUTH_SCOPES),
@@ -194,10 +210,49 @@ fn oauth_login() -> Result<String> {
     }
 
     // Exchange code for token
-    let token = exchange_code_for_token(&auth_code, &redirect_uri, &code_verifier)?;
-    eprintln!("Login successful!\n");
+    let access_token = exchange_code_for_token(&auth_code, &redirect_uri, &code_verifier)?;
+    eprintln!("OAuth token acquired. Creating API key...");
 
-    Ok(token)
+    // Try to create an API key via the Console endpoint
+    match create_api_key(&access_token) {
+        Ok(api_key) => {
+            eprintln!("Login successful!\n");
+            Ok(api_key)
+        }
+        Err(_) => {
+            // If create_api_key fails, the token itself might work (Claude.ai subscriber)
+            eprintln!("Login successful (using OAuth token directly).\n");
+            Ok(access_token)
+        }
+    }
+}
+
+/// Create an API key using the OAuth access token (Console users)
+fn create_api_key(access_token: &str) -> Result<String> {
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .post(CREATE_API_KEY_URL)
+        .header("Authorization", format!("Bearer {}", access_token))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .header("content-type", "application/json")
+        .json(&serde_json::json!({
+            "name": "mini-claude-code"
+        }))
+        .send()?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().unwrap_or_default();
+        return Err(anyhow!("Failed to create API key ({}): {}", status, text));
+    }
+
+    let body: serde_json::Value = response.json()?;
+    body.get("api_key")
+        .or_else(|| body.get("key"))
+        .or_else(|| body.get("secret"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| anyhow!("API key not found in response: {}", body))
 }
 
 fn wait_for_callback(listener: &TcpListener) -> Result<(String, String)> {
