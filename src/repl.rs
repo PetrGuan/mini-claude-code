@@ -8,10 +8,10 @@ use crate::ui::input::read_user_input;
 use crate::ui::render::print_stream_chunk;
 use anyhow::Result;
 
-/// Max characters to store per tool result in conversation history (I3)
+/// Max characters to store per tool result in conversation history
 const MAX_TOOL_RESULT_CHARS: usize = 40_000;
 
-/// Truncate a string at a UTF-8 safe boundary (C1)
+/// Truncate a string at a UTF-8 safe boundary
 fn truncate_utf8(s: &str, max_chars: usize) -> String {
     if s.chars().count() <= max_chars {
         s.to_string()
@@ -21,20 +21,97 @@ fn truncate_utf8(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// Format a tool input for display — show key parameters concisely
+fn format_tool_input(name: &str, input: &serde_json::Value) -> String {
+    match name {
+        "bash" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|s| truncate_utf8(s, 80))
+            .unwrap_or_default(),
+        "read" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "write" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "edit" => {
+            let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{}", path)
+        }
+        "glob" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            format!("{} in {}", pattern, path)
+        }
+        "grep" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            format!("/{}/ in {}", pattern, path)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Format tool result for preview — show first few meaningful lines
+fn format_tool_preview(content: &str, is_error: bool) -> String {
+    let prefix = if is_error {
+        "\x1b[31m✗\x1b[0m"
+    } else {
+        "\x1b[32m✓\x1b[0m"
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return format!("  {} (empty)", prefix);
+    }
+
+    let preview_lines = if lines.len() <= 3 {
+        lines
+    } else {
+        let mut v = lines[..3].to_vec();
+        v.push(&"...");
+        v
+    };
+
+    let formatted: Vec<String> = preview_lines
+        .iter()
+        .enumerate()
+        .map(|(i, line)| {
+            let truncated = truncate_utf8(line, 120);
+            if i == 0 {
+                format!("  {} {}", prefix, truncated)
+            } else {
+                format!("    {}", truncated)
+            }
+        })
+        .collect();
+
+    formatted.join("\n")
+}
+
 pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()> {
     let mut messages: Vec<Message> = Vec::new();
     let tool_defs = registry.definitions();
 
-    println!("\x1b[1;32mmini-claude-code\x1b[0m v0.1.0");
-    println!("Model: {}", client.model);
-    println!("Type your message (press Enter twice to send, Ctrl+C to exit)\n");
+    // Welcome banner
+    println!();
+    println!("  \x1b[1;32mmini-claude-code\x1b[0m v0.1.0");
+    println!("  \x1b[2mModel: {}\x1b[0m", client.model);
+    println!("  \x1b[2mTools: bash, read, write, edit, glob, grep\x1b[0m");
+    println!("  \x1b[2mEnter twice to send · Ctrl+C to exit\x1b[0m");
+    println!();
 
     loop {
         let input = match read_user_input() {
             Some(s) if s.is_empty() => continue,
             Some(s) => s,
             None => {
-                println!("Goodbye!");
+                println!("\n  \x1b[2mGoodbye!\x1b[0m");
                 break;
             }
         };
@@ -46,12 +123,21 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
 
         // Tool use loop: keep calling API until model stops using tools
         loop {
-            // I4: API errors are non-fatal — display and return to prompt
+            // Show thinking indicator
+            print!("\n\x1b[2m  Thinking...\x1b[0m");
+            std::io::Write::flush(&mut std::io::stdout()).ok();
+
+            // API errors are non-fatal — display and return to prompt
             let mut rx = match client.send_message_stream(&messages, &tool_defs).await {
-                Ok(rx) => rx,
+                Ok(rx) => {
+                    // Clear "Thinking..." line
+                    print!("\r\x1b[K");
+                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                    rx
+                }
                 Err(e) => {
-                    eprintln!("\n\x1b[1;31mAPI Error: {}\x1b[0m", e);
-                    // Remove the last user message so user can retry
+                    print!("\r\x1b[K");
+                    eprintln!("\x1b[1;31m  API Error: {}\x1b[0m\n", e);
                     messages.pop();
                     break;
                 }
@@ -63,15 +149,13 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
             let mut current_tool_name = String::new();
             let mut current_tool_input_json = String::new();
             let mut stream_error = false;
-
-            println!();
+            let mut first_text = true;
 
             while let Some(event_result) = rx.recv().await {
-                // I4: Stream errors are non-fatal
                 let sse_event = match event_result {
                     Ok(ev) => ev,
                     Err(e) => {
-                        eprintln!("\n\x1b[1;31mStream error: {}\x1b[0m", e);
+                        eprintln!("\n\x1b[1;31m  Stream error: {}\x1b[0m", e);
                         stream_error = true;
                         break;
                     }
@@ -82,6 +166,10 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                         StreamEvent::ContentBlockStart { content_block, .. } => {
                             match content_block {
                                 ContentBlockStartData::Text { text } => {
+                                    if first_text {
+                                        println!();
+                                        first_text = false;
+                                    }
                                     current_text = text;
                                 }
                                 ContentBlockStartData::ToolUse { id, name } => {
@@ -94,7 +182,6 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                                     current_tool_id = id;
                                     current_tool_name = name.clone();
                                     current_tool_input_json.clear();
-                                    println!("\n\x1b[1;33m[Tool: {}]\x1b[0m", name);
                                 }
                             }
                         }
@@ -130,7 +217,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                         StreamEvent::Ping => {}
                         StreamEvent::MessageStart { .. } => {}
                         StreamEvent::Error { error } => {
-                            eprintln!("\n\x1b[1;31mAPI Error: {}\x1b[0m", error.message);
+                            eprintln!("\n\x1b[1;31m  API Error: {}\x1b[0m", error.message);
                             stream_error = true;
                             break;
                         }
@@ -141,9 +228,8 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
 
             println!();
 
-            // If stream errored, drop partial response and return to prompt
             if stream_error {
-                messages.pop(); // remove the user message that caused the error
+                messages.pop();
                 break;
             }
 
@@ -166,16 +252,22 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                 break;
             }
 
+            // Execute tools with nice formatting
             let mut tool_results: Vec<ContentBlock> = Vec::new();
             for (id, name, input) in &tool_uses {
+                let input_desc = format_tool_input(name, input);
+                let tool_label = if input_desc.is_empty() {
+                    format!("\x1b[1;33m  [{}]\x1b[0m", name)
+                } else {
+                    format!("\x1b[1;33m  [{}: {}]\x1b[0m", name, input_desc)
+                };
+                println!("{}", tool_label);
+
                 match registry.get(name) {
                     Some(tool) => {
-                        println!("\x1b[2m  Executing {}...\x1b[0m", name);
                         match tool.execute(input.clone()).await {
                             Ok(result) => {
-                                let preview = truncate_utf8(&result.content, 200);
-                                println!("\x1b[2m  Result: {}\x1b[0m", preview);
-                                // I3: Truncate large tool results before storing in history
+                                println!("{}", format_tool_preview(&result.content, result.is_error));
                                 let stored_content =
                                     truncate_utf8(&result.content, MAX_TOOL_RESULT_CHARS);
                                 tool_results.push(ContentBlock::ToolResult {
@@ -185,6 +277,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                                 });
                             }
                             Err(e) => {
+                                println!("  \x1b[31m✗ Error: {}\x1b[0m", e);
                                 tool_results.push(ContentBlock::ToolResult {
                                     tool_use_id: id.clone(),
                                     content: format!("Error: {}", e),
@@ -194,6 +287,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                         }
                     }
                     None => {
+                        println!("  \x1b[31m✗ Unknown tool '{}'\x1b[0m", name);
                         tool_results.push(ContentBlock::ToolResult {
                             tool_use_id: id.clone(),
                             content: format!("Error: unknown tool '{}'", name),
@@ -233,5 +327,38 @@ mod tests {
     fn test_truncate_utf8_multibyte() {
         let s = "你好世界测试";
         assert_eq!(truncate_utf8(s, 4), "你好世界...");
+    }
+
+    #[test]
+    fn test_format_tool_input_bash() {
+        let input = serde_json::json!({"command": "ls -la"});
+        assert_eq!(format_tool_input("bash", &input), "ls -la");
+    }
+
+    #[test]
+    fn test_format_tool_input_grep() {
+        let input = serde_json::json!({"pattern": "TODO", "path": "src/"});
+        assert_eq!(format_tool_input("grep", &input), "/TODO/ in src/");
+    }
+
+    #[test]
+    fn test_format_tool_preview_success() {
+        let preview = format_tool_preview("line1\nline2\nline3", false);
+        assert!(preview.contains("✓"));
+        assert!(preview.contains("line1"));
+    }
+
+    #[test]
+    fn test_format_tool_preview_error() {
+        let preview = format_tool_preview("error msg", true);
+        assert!(preview.contains("✗"));
+    }
+
+    #[test]
+    fn test_format_tool_preview_truncates_lines() {
+        let content = "line1\nline2\nline3\nline4\nline5";
+        let preview = format_tool_preview(content, false);
+        assert!(preview.contains("..."));
+        assert!(!preview.contains("line4"));
     }
 }
