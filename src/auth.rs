@@ -303,20 +303,18 @@ fn exchange_code_for_token(
     redirect_uri: &str,
     code_verifier: &str,
 ) -> Result<String> {
-    let body = serde_json::json!({
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": OAUTH_CLIENT_ID,
-        "code_verifier": code_verifier,
-    });
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", OAUTH_CLIENT_ID),
+        ("code_verifier", code_verifier),
+    ];
 
-    // Use blocking reqwest since this is called during init
     let client = reqwest::blocking::Client::new();
     let response = client
         .post(OAUTH_TOKEN_URL)
-        .header("content-type", "application/json")
-        .json(&body)
+        .form(&params)
         .send()?;
 
     if !response.status().is_success() {
