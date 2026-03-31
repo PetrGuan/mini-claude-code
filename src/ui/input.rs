@@ -21,7 +21,7 @@ impl Drop for RawModeGuard {
 /// Read user input from the terminal.
 /// Supports multiline: press Enter twice to submit, Ctrl+C to exit.
 pub fn read_user_input() -> Option<String> {
-    print!("\x1b[1;34m> \x1b[0m");
+    print!("\x1b[1;33m  ◇ \x1b[0m");
     io::stdout().flush().ok();
 
     let mut input = String::new();
@@ -70,7 +70,7 @@ pub fn read_user_input() -> Option<String> {
                         return Some(trimmed);
                     }
                     input.push('\n');
-                    print!("\r\n\x1b[1;34m. \x1b[0m");
+                    print!("\r\n\x1b[2m  . \x1b[0m");
                     io::stdout().flush().ok();
                 }
                 KeyEvent {

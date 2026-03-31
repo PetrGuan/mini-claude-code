@@ -5,7 +5,10 @@ use crate::api::types::{
 };
 use crate::tools::ToolRegistry;
 use crate::ui::input::read_user_input;
-use crate::ui::render::{count_display_lines, print_separator, print_stream_chunk, render_markdown_response};
+use crate::ui::render::{
+    count_display_lines, print_response_header, print_separator, print_stream_chunk,
+    render_final_response,
+};
 use anyhow::Result;
 
 /// Max characters to store per tool result in conversation history
@@ -100,9 +103,8 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
 
     // Welcome banner
     println!();
-    println!("  \x1b[1;32mmini-claude-code\x1b[0m v0.1.0");
-    println!("  \x1b[2mModel: {}\x1b[0m", client.model);
-    println!("  \x1b[2mTools: bash, read, write, edit, glob, grep\x1b[0m");
+    println!("  \x1b[1;36m◆ mini-claude-code\x1b[0m \x1b[2mv0.1.0\x1b[0m");
+    println!("  \x1b[2m{} · bash, read, write, edit, glob, grep\x1b[0m", client.model);
     println!("  \x1b[2mEnter twice to send · Ctrl+C to exit\x1b[0m");
     println!();
 
@@ -175,7 +177,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                             match content_block {
                                 ContentBlockStartData::Text { text } => {
                                     if first_text {
-                                        println!();
+                                        print_response_header();
                                         first_text = false;
                                     }
                                     current_text = text;
@@ -235,22 +237,27 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                 }
             }
 
-            // Re-render text with markdown formatting
+            // Re-render streamed text with markdown formatting
             if has_text_content && !stream_error {
-                // Collect all text from this response
                 let full_text: String = assistant_content
                     .iter()
                     .filter_map(|b| match b {
                         ContentBlock::Text { text } => Some(text.as_str()),
                         _ => None,
                     })
-                    .chain(if !current_text.is_empty() { Some(current_text.as_str()) } else { None })
+                    .chain(
+                        if !current_text.is_empty() {
+                            Some(current_text.as_str())
+                        } else {
+                            None
+                        },
+                    )
                     .collect::<Vec<_>>()
                     .join("");
 
                 if !full_text.is_empty() {
                     streamed_lines = count_display_lines(&full_text);
-                    render_markdown_response(&full_text, streamed_lines);
+                    render_final_response(&full_text, streamed_lines);
                 }
             } else {
                 println!();
