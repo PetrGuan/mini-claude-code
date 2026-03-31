@@ -70,7 +70,6 @@ impl LineEditor {
         self.cursor += c.len_utf8();
     }
 
-
     /// Find the placeholder span (start, end, id) that contains or touches `pos`.
     /// pos > start && pos <= end means "inside or at the end, but not before".
     fn placeholder_span_at(&self, pos: usize) -> Option<(usize, usize, usize)> {
@@ -613,10 +612,10 @@ mod tests {
     #[test]
     fn test_backspace_joins_lines() {
         let mut ed = LineEditor::new();
-        // Use paste to create two lines
-        ed.insert_paste("a\n");
-        assert_eq!(ed.lines.len(), 2);
-        // Now on empty second line, backspace should go up
+        ed.lines = vec!["a".to_string(), String::new()];
+        ed.cursor = 0;
+        ed.displayed_lines = 2;
+        // On empty second line, backspace should go up
         let went_up = ed.backspace();
         assert!(went_up);
         assert_eq!(ed.lines.len(), 1);
@@ -746,7 +745,6 @@ mod tests {
         ed.move_right();
         assert_eq!(ed.cursor, 2);
     }
-
 
     #[test]
     fn test_utf8_insert_and_backspace() {
