@@ -217,28 +217,24 @@ fn oauth_login() -> Result<String> {
     // Try to create an API key via the Console endpoint
     match create_api_key(&access_token) {
         Ok(api_key) => {
-            eprintln!("Login successful!\n");
+            eprintln!("API key created. Login successful!\n");
             Ok(api_key)
         }
-        Err(_) => {
+        Err(e) => {
             // If create_api_key fails, the token itself might work (Claude.ai subscriber)
-            eprintln!("Login successful (using OAuth token directly).\n");
+            eprintln!("Note: Could not create API key ({}), using OAuth token directly.\n", e);
             Ok(access_token)
         }
     }
 }
 
 /// Create an API key using the OAuth access token (Console users)
+/// Matches Claude Code: POST with null body, Bearer auth, response field `raw_key`
 fn create_api_key(access_token: &str) -> Result<String> {
     let client = reqwest::blocking::Client::new();
     let response = client
         .post(CREATE_API_KEY_URL)
         .header("Authorization", format!("Bearer {}", access_token))
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .header("content-type", "application/json")
-        .json(&serde_json::json!({
-            "name": "mini-claude-code"
-        }))
         .send()?;
 
     if !response.status().is_success() {
@@ -248,9 +244,7 @@ fn create_api_key(access_token: &str) -> Result<String> {
     }
 
     let body: serde_json::Value = response.json()?;
-    body.get("api_key")
-        .or_else(|| body.get("key"))
-        .or_else(|| body.get("secret"))
+    body.get("raw_key")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| anyhow!("API key not found in response: {}", body))
