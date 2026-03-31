@@ -22,6 +22,11 @@ impl CostTracker {
         }
     }
 
+    /// Add usage from a streaming event.
+    /// Anthropic API reports usage across two events:
+    /// - message_start.message.usage: input_tokens, cache tokens (output_tokens = 0)
+    /// - message_delta.usage: output_tokens (input_tokens = 0)
+    /// Fields default to 0 via serde, so adding both is safe without double-counting.
     pub fn add_usage(&mut self, usage: &Usage) {
         self.total_input_tokens += usage.input_tokens;
         self.total_output_tokens += usage.output_tokens;
@@ -33,29 +38,38 @@ impl CostTracker {
         self.turns += 1;
     }
 
+    /// Total tokens including cache tokens.
     pub fn total_tokens(&self) -> u64 {
-        self.total_input_tokens + self.total_output_tokens
+        self.total_input_tokens
+            + self.total_output_tokens
+            + self.total_cache_read_tokens
+            + self.total_cache_creation_tokens
     }
 
     /// Estimated cost in USD based on model pricing.
+    /// Pricing as of 2025-03: https://docs.anthropic.com/en/docs/about-claude/pricing
     pub fn estimated_cost(&self) -> f64 {
-        let (input_per_m, output_per_m) = model_pricing(&self.model);
-        let input_cost = self.total_input_tokens as f64 * input_per_m / 1_000_000.0;
-        let output_cost = self.total_output_tokens as f64 * output_per_m / 1_000_000.0;
-        // Cache reads are cheaper (typically 10% of input price)
+        let pricing = model_pricing(&self.model);
+        let input_cost = self.total_input_tokens as f64 * pricing.input / 1_000_000.0;
+        let output_cost = self.total_output_tokens as f64 * pricing.output / 1_000_000.0;
         let cache_read_cost =
-            self.total_cache_read_tokens as f64 * (input_per_m * 0.1) / 1_000_000.0;
-        input_cost + output_cost + cache_read_cost
+            self.total_cache_read_tokens as f64 * pricing.cache_read / 1_000_000.0;
+        let cache_creation_cost =
+            self.total_cache_creation_tokens as f64 * pricing.cache_write / 1_000_000.0;
+        input_cost + output_cost + cache_read_cost + cache_creation_cost
     }
 
     /// Format a summary line for display.
     pub fn summary(&self) -> String {
         let total = self.total_tokens();
         let cost = self.estimated_cost();
-        let tokens_str = format_tokens(total);
+        let turn_label = if self.turns == 1 { "turn" } else { "turns" };
         format!(
-            "{} turns · {} tokens · ${:.4}",
-            self.turns, tokens_str, cost
+            "{} {} · {} tokens · ${:.4}",
+            self.turns,
+            turn_label,
+            format_tokens(total),
+            cost
         )
     }
 
@@ -63,8 +77,8 @@ impl CostTracker {
     pub fn detail(&self) -> String {
         let cost = self.estimated_cost();
         let mut lines = Vec::new();
-        lines.push(format!("  \x1b[1mSession Cost\x1b[0m"));
-        lines.push(format!(""));
+        lines.push("  \x1b[1mSession Cost\x1b[0m".to_string());
+        lines.push(String::new());
         lines.push(format!(
             "  Input tokens:    {:>8}",
             format_tokens(self.total_input_tokens)
@@ -85,15 +99,16 @@ impl CostTracker {
                 format_tokens(self.total_cache_creation_tokens)
             ));
         }
-        lines.push(format!(
-            "  \x1b[2m─────────────────────\x1b[0m"
-        ));
+        lines.push("  \x1b[2m─────────────────────\x1b[0m".to_string());
         lines.push(format!(
             "  Total:           {:>8}",
             format_tokens(self.total_tokens())
         ));
         lines.push(format!("  Turns:           {:>8}", self.turns));
-        lines.push(format!("  Est. cost:       \x1b[1m${:.4}\x1b[0m", cost));
+        lines.push(format!(
+            "  Est. cost:       \x1b[1m${:.4}\x1b[0m",
+            cost
+        ));
         lines.push(format!("  Model:           {}", self.model));
         lines.join("\n")
     }
@@ -109,17 +124,45 @@ fn format_tokens(n: u64) -> String {
     }
 }
 
-/// Returns (input_price_per_million, output_price_per_million) in USD.
-fn model_pricing(model: &str) -> (f64, f64) {
+/// Per-model pricing in USD per million tokens.
+/// Source: https://docs.anthropic.com/en/docs/about-claude/pricing (as of 2025-03)
+struct ModelPricing {
+    input: f64,
+    output: f64,
+    cache_read: f64,
+    cache_write: f64,
+}
+
+fn model_pricing(model: &str) -> ModelPricing {
     if model.contains("opus") {
-        (15.0, 75.0)
+        ModelPricing {
+            input: 15.0,
+            output: 75.0,
+            cache_read: 1.50,
+            cache_write: 18.75,
+        }
     } else if model.contains("sonnet") {
-        (3.0, 15.0)
+        ModelPricing {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.30,
+            cache_write: 3.75,
+        }
     } else if model.contains("haiku") {
-        (0.80, 4.0)
+        ModelPricing {
+            input: 0.80,
+            output: 4.0,
+            cache_read: 0.08,
+            cache_write: 1.0,
+        }
     } else {
         // Unknown model — use Sonnet pricing as default
-        (3.0, 15.0)
+        ModelPricing {
+            input: 3.0,
+            output: 15.0,
+            cache_read: 0.30,
+            cache_write: 3.75,
+        }
     }
 }
 
@@ -128,18 +171,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cost_tracker_basic() {
+    fn test_cost_haiku_exact() {
         let mut tracker = CostTracker::new("claude-haiku-4-5-20251001");
         tracker.add_usage(&Usage {
-            input_tokens: 1000,
-            output_tokens: 500,
+            input_tokens: 1_000_000,
+            output_tokens: 1_000_000,
             cache_read_input_tokens: 0,
             cache_creation_input_tokens: 0,
         });
-        tracker.add_turn();
-        assert_eq!(tracker.total_tokens(), 1500);
-        assert_eq!(tracker.turns, 1);
-        assert!(tracker.estimated_cost() > 0.0);
+        // Haiku: $0.80/M input + $4.0/M output = $4.80
+        let cost = tracker.estimated_cost();
+        assert!((cost - 4.80).abs() < 0.001, "Expected $4.80, got ${}", cost);
+    }
+
+    #[test]
+    fn test_cost_with_cache() {
+        let mut tracker = CostTracker::new("claude-sonnet-4-20250514");
+        tracker.add_usage(&Usage {
+            input_tokens: 0,
+            output_tokens: 0,
+            cache_read_input_tokens: 1_000_000,
+            cache_creation_input_tokens: 1_000_000,
+        });
+        // Sonnet: cache_read $0.30/M + cache_write $3.75/M = $4.05
+        let cost = tracker.estimated_cost();
+        assert!(
+            (cost - 4.05).abs() < 0.001,
+            "Expected $4.05, got ${}",
+            cost
+        );
+    }
+
+    #[test]
+    fn test_total_tokens_includes_cache() {
+        let mut tracker = CostTracker::new("claude-haiku-4-5-20251001");
+        tracker.add_usage(&Usage {
+            input_tokens: 100,
+            output_tokens: 50,
+            cache_read_input_tokens: 200,
+            cache_creation_input_tokens: 30,
+        });
+        assert_eq!(tracker.total_tokens(), 380);
     }
 
     #[test]
@@ -150,25 +222,19 @@ mod tests {
     }
 
     #[test]
-    fn test_model_pricing() {
-        let (i, o) = model_pricing("claude-haiku-4-5-20251001");
-        assert_eq!(i, 0.80);
-        assert_eq!(o, 4.0);
+    fn test_summary_singular_turn() {
+        let mut tracker = CostTracker::new("claude-haiku-4-5-20251001");
+        tracker.add_turn();
+        let summary = tracker.summary();
+        assert!(summary.contains("1 turn "));
     }
 
     #[test]
-    fn test_summary_format() {
+    fn test_summary_plural_turns() {
         let mut tracker = CostTracker::new("claude-haiku-4-5-20251001");
-        tracker.add_usage(&Usage {
-            input_tokens: 10000,
-            output_tokens: 5000,
-            cache_read_input_tokens: 0,
-            cache_creation_input_tokens: 0,
-        });
+        tracker.add_turn();
         tracker.add_turn();
         let summary = tracker.summary();
-        assert!(summary.contains("1 turns"));
-        assert!(summary.contains("15.0K"));
-        assert!(summary.contains("$"));
+        assert!(summary.contains("2 turns"));
     }
 }
