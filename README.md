@@ -2,20 +2,20 @@
 
 A minimal [Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI rebuilt from scratch in Rust. Interactive AI coding assistant in your terminal — chat with Claude, run commands, read/write/edit files, and search your codebase.
 
-Inspired by [Claude Code](https://docs.anthropic.com/en/docs/claude-code), reimplemented from scratch in ~1,400 lines of Rust.
+Inspired by [Claude Code](https://docs.anthropic.com/en/docs/claude-code), reimplemented from scratch in ~2,400 lines of Rust.
 
 ## Demo
 
 ```
   ◆ mini-claude-code v0.1.0
   claude-haiku-4-5-20251001 · bash, read, write, edit, glob, grep
-  Enter twice to send · Ctrl+C to exit
+  Enter to send · /cost for usage · Ctrl+C to exit
 
   ◇ What files are in the src directory?
 
   ◆ Claude
 
-  [glob: *.rs in src/]
+  [glob: **/*.rs in src/]
   ✓ src/main.rs
     src/repl.rs
     src/auth.rs
@@ -25,11 +25,25 @@ Inspired by [Claude Code](https://docs.anthropic.com/en/docs/claude-code), reimp
   ● src/main.rs — CLI entry point
   ● src/repl.rs — REPL loop
   ● src/auth.rs — Authentication
+
+  ────────────────────────────────────────
+
+  ◇ /cost
+
+  Session Cost
+
+  Input tokens:       1.2K
+  Output tokens:        384
+  ─────────────────────
+  Total:              1.6K
+  Turns:                  1
+  Est. cost:         $0.0025
+  Model:             claude-haiku-4-5-20251001
 ```
 
 ## Features
 
-- **Interactive REPL** with streaming output
+- **Interactive REPL** — single Enter to send, streaming output
 - **6 built-in tools** that Claude can invoke:
 
   | Tool | Description |
@@ -41,18 +55,20 @@ Inspired by [Claude Code](https://docs.anthropic.com/en/docs/claude-code), reimp
   | `glob` | Find files by pattern (`**/*.rs`) |
   | `grep` | Search file contents via ripgrep |
 
+- **Syntax-highlighted code blocks** — powered by syntect, with bordered frames
+- **Markdown rendering** — headers, bold, italic, inline code, lists
+- **Smart paste** — bracketed paste support; long pastes (>5 lines) collapse to `[Pasted#1: 42 lines]`
+- **Animated spinner** — braille animation during thinking + terminal progress bar (blue laser in iTerm2/Ghostty)
+- **Cost tracking** — `/cost` command for detailed breakdown, session summary on exit
 - **Smart authentication** — auto-detects API key from env, macOS Keychain, or OAuth login
-- **Streaming** — text appears in real-time as Claude generates it
-- **Tool loop** — Claude can chain multiple tool calls before responding
-- **Markdown rendering** — code blocks with syntax highlighting, bold, italic, lists
-- **Animated spinner** — visual feedback during thinking and tool execution
-- **Single binary** — ~6 MB release build, no runtime dependencies
+- **Full line editor** — cursor movement (arrow keys, Home/End), Ctrl+W/U/K shortcuts, proper backspace
+- **Single binary** — 7.6 MB release build, no runtime dependencies
 
 ## Install
 
 ### Prerequisites
 
-- [Rust toolchain](https://rustup.rs/) (1.70+)
+- [Rust toolchain](https://rustup.rs/) (1.80+)
 - [ripgrep](https://github.com/BurntSushi/ripgrep) (`brew install ripgrep`)
 
 ### Build from source
@@ -96,10 +112,25 @@ Options:
 3. macOS Keychain — `Claude Code` managed key (if you've used Claude Code)
 4. Interactive OAuth login (opens browser, creates and caches API key)
 
-### Input
+### Keyboard shortcuts
 
-- Type your message, press **Enter twice** to send
-- **Ctrl+C** to exit
+| Key | Action |
+|-----|--------|
+| Enter | Send message |
+| Ctrl+C | Exit |
+| ← → | Move cursor |
+| Home / Ctrl+A | Jump to start of line |
+| End / Ctrl+E | Jump to end of line |
+| Ctrl+W | Delete previous word |
+| Ctrl+U | Clear line |
+| Ctrl+K | Delete to end of line |
+| Cmd+V | Paste (long pastes auto-collapse) |
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `/cost` | Show token usage and estimated cost |
 
 ## Architecture
 
@@ -107,10 +138,11 @@ Options:
 src/
 ├── main.rs              # CLI entry (clap), launches REPL
 ├── auth.rs              # Multi-strategy auth (env → keychain → OAuth PKCE)
+├── cost.rs              # Token/cost tracking with model pricing
 ├── repl.rs              # REPL loop: input → API → tool execution → output
 ├── api/
 │   ├── client.rs        # Anthropic API client (streaming)
-│   ├── types.rs         # Request/response serde types
+│   ├── types.rs         # Request/response serde types (incl. Usage)
 │   └── stream.rs        # SSE stream parser
 ├── tools/
 │   ├── mod.rs           # Tool trait + registry
@@ -121,10 +153,10 @@ src/
 │   ├── glob.rs          # GlobTool
 │   └── grep.rs          # GrepTool (via ripgrep)
 └── ui/
-    ├── input.rs         # Terminal input (raw mode + RAII guard)
+    ├── input.rs         # Line editor (cursor, paste, shortcuts)
     ├── render.rs        # Markdown rendering + code block formatting
-    ├── highlight.rs     # Syntax highlighting (syntect)
-    └── spinner.rs       # Animated spinner
+    ├── highlight.rs     # Syntax highlighting (syntect, lazy-loaded)
+    └── spinner.rs       # Animated spinner + terminal progress bar
 ```
 
 ### How it works
@@ -133,7 +165,7 @@ src/
 User input → Build messages → POST /v1/messages (stream: true)
   → Stream text to terminal in real-time
   → If tool_use → execute tool → send result back → loop
-  → If end_turn → wait for next input
+  → If end_turn → render markdown → wait for next input
 ```
 
 ## Tech Stack
@@ -159,14 +191,14 @@ This is intentionally minimal. Not included:
 - Plugin / skill system
 - IDE integration
 - Persistent memory
-- Conversation history persistence
-- Cost tracking
-- Slash commands
+- Conversation history persistence / resume
+
+See [docs/vision.md](docs/vision.md) for the roadmap of planned features.
 
 ## Development
 
 ```bash
-# Run tests
+# Run tests (83 tests)
 cargo test
 
 # Run in debug mode
@@ -184,7 +216,7 @@ This project was built to:
 2. **Build** — produce a fast, usable CLI tool for daily development tasks
 3. **Explore Rust** — practice Rust with a real-world async + CLI project
 
-~1,400 lines of Rust, focused on the essential 20% of functionality.
+~2,400 lines of Rust, focused on the essential 20% of functionality.
 
 ## License
 
