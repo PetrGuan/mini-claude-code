@@ -265,9 +265,11 @@ pub fn read_user_input() -> Option<String> {
                 } => {
                     let went_up = editor.backspace();
                     if went_up {
+                        // Clear current (now-empty) line, move up, redraw previous line
                         let line = editor.current_line().to_string();
                         let prefix = line_prefix(editor.lines.len() == 1);
-                        print!("\x1b[A\r\x1b[2K{}{}", prefix, line);
+                        // Erase the empty line we're on, move up, redraw
+                        print!("\x1b[2K\x1b[A\r\x1b[2K{}{}", prefix, line);
                         position_cursor(&editor);
                         io::stdout().flush().ok();
                     } else {
