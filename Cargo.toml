@@ -17,3 +17,6 @@ globwalk = "0.9"
 anyhow = "1"
 async-trait = "0.1"
 futures-util = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
