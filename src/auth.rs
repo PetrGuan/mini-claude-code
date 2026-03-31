@@ -108,7 +108,17 @@ fn read_from_keychain() -> Option<AuthResult> {
         }
     }
 
-    // Try Claude Code's OAuth token storage
+    // Try Claude Code's managed API key
+    if let Some(key) = keychain_find("Claude Code", &username) {
+        if key.starts_with("sk-") {
+            return Some(AuthResult {
+                api_key: Some(key),
+                oauth_token: None,
+            });
+        }
+    }
+
+    // Try Claude Code's OAuth token storage (hex-encoded JSON)
     if let Some(hex_value) = keychain_find("Claude Code-credentials", &username) {
         if let Some(token) = parse_hex_oauth_token(&hex_value) {
             return Some(AuthResult {
@@ -244,14 +254,16 @@ fn oauth_login() -> Result<String> {
     eprintln!("OAuth token acquired. Creating API key...");
 
     // Try to create an API key via the Console endpoint
+    eprintln!("Exchanging OAuth token for API key...");
     match create_api_key(&access_token) {
         Ok(api_key) => {
-            eprintln!("API key created. Login successful!\n");
+            eprintln!("API key created ({}...)", &api_key[..20.min(api_key.len())]);
+            eprintln!("Login successful!\n");
             Ok(api_key)
         }
         Err(e) => {
-            // If create_api_key fails, the token itself might work (Claude.ai subscriber)
-            eprintln!("Note: Could not create API key ({}), using OAuth token directly.\n", e);
+            eprintln!("Warning: Could not create API key: {}", e);
+            eprintln!("Falling back to OAuth token for direct API access.\n");
             Ok(access_token)
         }
     }

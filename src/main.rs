@@ -10,7 +10,7 @@ use clap::Parser;
 #[command(name = "mini-claude-code", about = "A minimal Claude Code CLI")]
 struct Cli {
     /// Model to use
-    #[arg(short, long, default_value = "claude-sonnet-4-20250514")]
+    #[arg(short, long, default_value = "claude-haiku-4-5-20251001")]
     model: String,
 
     /// Max tokens for response
