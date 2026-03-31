@@ -108,7 +108,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
     println!();
     println!("  \x1b[1;36m◆ mini-claude-code\x1b[0m \x1b[2mv0.1.0\x1b[0m");
     println!("  \x1b[2m{} · bash, read, write, edit, glob, grep\x1b[0m", client.model);
-    println!("  \x1b[2mEnter twice to send · Ctrl+C to exit\x1b[0m");
+    println!("  \x1b[2mEnter to send · /cost for usage · Ctrl+C to exit\x1b[0m");
     println!();
 
     let mut turn = 0;

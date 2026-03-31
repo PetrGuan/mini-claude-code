@@ -35,7 +35,6 @@ fn make_placeholder(id: usize, content: &str) -> String {
 struct LineEditor {
     lines: Vec<String>,
     cursor: usize,
-    consecutive_newlines: usize,
     displayed_lines: usize,
     /// Stored pasted content with unique IDs
     pasted: Vec<(usize, String)>,
@@ -47,7 +46,6 @@ impl LineEditor {
         Self {
             lines: vec![String::new()],
             cursor: 0,
-            consecutive_newlines: 0,
             displayed_lines: 1,
             pasted: Vec::new(),
             next_paste_id: 1,
@@ -63,7 +61,6 @@ impl LineEditor {
     }
 
     fn insert_char(&mut self, c: char) {
-        self.consecutive_newlines = 0;
         let line = self.lines.last_mut().unwrap();
         if self.cursor >= line.len() {
             line.push(c);
@@ -73,16 +70,6 @@ impl LineEditor {
         self.cursor += c.len_utf8();
     }
 
-    fn newline(&mut self) -> bool {
-        self.consecutive_newlines += 1;
-        if self.consecutive_newlines >= 2 {
-            return true; // signal: submit
-        }
-        self.lines.push(String::new());
-        self.displayed_lines = self.lines.len();
-        self.cursor = 0;
-        false
-    }
 
     /// Find the placeholder span (start, end, id) that contains or touches `pos`.
     /// pos > start && pos <= end means "inside or at the end, but not before".
@@ -106,7 +93,6 @@ impl LineEditor {
         if is_current_empty && self.lines.len() > 1 {
             self.lines.pop();
             self.cursor = self.current_line().len();
-            self.consecutive_newlines = 0;
             self.displayed_lines = self.lines.len();
             return true; // went up a line
         }
@@ -128,7 +114,6 @@ impl LineEditor {
                 line.replace_range(new_cursor..self.cursor, "");
                 self.cursor = new_cursor;
             }
-            self.consecutive_newlines = 0;
         }
         false
     }
@@ -247,7 +232,6 @@ impl LineEditor {
 
     /// Insert pasted text. Long pastes (>5 lines) are collapsed to a placeholder.
     fn insert_paste(&mut self, text: &str) {
-        self.consecutive_newlines = 0;
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         let line_count = normalized.split('\n').count();
 
@@ -348,14 +332,10 @@ pub fn read_user_input() -> Option<String> {
                     code: KeyCode::Enter,
                     ..
                 } => {
-                    if editor.newline() {
-                        println!();
-                        let text = editor.full_text();
-                        let trimmed = text.trim().to_string();
-                        return Some(trimmed);
-                    }
-                    print!("\r\n\x1b[2m{}\x1b[0m", CONTINUATION);
-                    io::stdout().flush().ok();
+                    println!();
+                    let text = editor.full_text();
+                    let trimmed = text.trim().to_string();
+                    return Some(trimmed);
                 }
 
                 KeyEvent {
@@ -633,9 +613,10 @@ mod tests {
     #[test]
     fn test_backspace_joins_lines() {
         let mut ed = LineEditor::new();
-        ed.insert_char('a');
-        ed.newline();
-        // Now on empty second line
+        // Use paste to create two lines
+        ed.insert_paste("a\n");
+        assert_eq!(ed.lines.len(), 2);
+        // Now on empty second line, backspace should go up
         let went_up = ed.backspace();
         assert!(went_up);
         assert_eq!(ed.lines.len(), 1);
@@ -766,21 +747,6 @@ mod tests {
         assert_eq!(ed.cursor, 2);
     }
 
-    #[test]
-    fn test_newline_submit_on_double() {
-        let mut ed = LineEditor::new();
-        assert!(!ed.newline()); // first Enter
-        assert!(ed.newline()); // second Enter → submit
-    }
-
-    #[test]
-    fn test_consecutive_newlines_reset_on_char() {
-        let mut ed = LineEditor::new();
-        ed.newline();
-        ed.insert_char('a');
-        assert_eq!(ed.consecutive_newlines, 0);
-        assert!(!ed.newline()); // reset, so this is first Enter again
-    }
 
     #[test]
     fn test_utf8_insert_and_backspace() {
