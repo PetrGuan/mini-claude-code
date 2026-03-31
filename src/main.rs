@@ -1,4 +1,5 @@
 mod api;
+mod auth;
 mod repl;
 mod tools;
 mod ui;
@@ -21,8 +22,13 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    let api_key = std::env::var("ANTHROPIC_API_KEY")
-        .expect("ANTHROPIC_API_KEY environment variable must be set");
+    let api_key = match auth::get_api_key() {
+        Ok(key) => key,
+        Err(msg) => {
+            eprintln!("{}", msg);
+            std::process::exit(1);
+        }
+    };
 
     let cwd = std::env::current_dir()?.display().to_string();
 

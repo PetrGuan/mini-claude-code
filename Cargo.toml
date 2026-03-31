@@ -13,6 +13,7 @@ clap = { version = "4", features = ["derive"] }
 crossterm = "0.28"
 globwalk = "0.9"
 anyhow = "1"
+hex = "0.4"
 async-trait = "0.1"
 futures-util = "0.3"
 
