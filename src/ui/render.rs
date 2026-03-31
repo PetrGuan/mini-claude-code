@@ -14,16 +14,17 @@ pub fn print_stream_chunk(text: &str) {
 }
 
 /// After streaming completes, render the full response with formatting.
-/// Clears the raw streamed text, then reprints with syntax-highlighted code blocks.
+/// Clears the raw streamed text, then reprints with header + markdown.
 pub fn render_final_response(raw_text: &str, lines_to_clear: usize) {
-    // Move cursor up to overwrite raw streamed text
-    for _ in 0..lines_to_clear {
+    // Move cursor up to overwrite raw streamed text + the blank line before it
+    for _ in 0..lines_to_clear + 1 {
         print!("\x1b[A\x1b[2K");
     }
     print!("\x1b[2K\r");
     io::stdout().flush().ok();
 
-    // Render with our custom markdown formatter
+    // Print header + rendered markdown
+    print_response_header();
     let rendered = render_markdown(raw_text);
     print!("{}", rendered);
     io::stdout().flush().ok();
@@ -212,7 +213,7 @@ fn find_closing(chars: &[char], start: usize, marker: char) -> Option<usize> {
 }
 
 fn find_double_closing(chars: &[char], start: usize, marker: char) -> Option<usize> {
-    for i in start..chars.len() - 1 {
+    for i in start..chars.len().saturating_sub(1) {
         if chars[i] == marker && chars[i + 1] == marker {
             return Some(i);
         }
@@ -236,4 +237,103 @@ fn visible_char_count(s: &str) -> usize {
         }
     }
     len
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_render_empty_string() {
+        let result = render_markdown("");
+        // Empty input produces empty or whitespace-only output
+        assert!(result.trim().is_empty());
+    }
+
+    #[test]
+    fn test_render_plain_text() {
+        let result = render_markdown("hello world");
+        assert!(result.contains("hello world"));
+    }
+
+    #[test]
+    fn test_render_header() {
+        let result = render_markdown("# My Title");
+        // Should contain ANSI codes for cyan
+        assert!(result.contains("My Title"));
+        assert!(result.contains("\x1b[1;36m"));
+    }
+
+    #[test]
+    fn test_render_bullet_list() {
+        let result = render_markdown("- item one\n- item two");
+        assert!(result.contains("●"));
+        assert!(result.contains("item one"));
+    }
+
+    #[test]
+    fn test_render_code_block() {
+        let result = render_markdown("```rust\nfn main() {}\n```");
+        // Should contain code block border
+        assert!(result.contains("╭"));
+        assert!(result.contains("╰"));
+        assert!(result.contains("rust"));
+    }
+
+    #[test]
+    fn test_render_unclosed_code_block() {
+        // Should not panic, should render the code
+        let result = render_markdown("```python\nprint('hello')");
+        assert!(result.contains("print"));
+    }
+
+    #[test]
+    fn test_render_inline_code() {
+        let result = render_markdown("use `cargo run` to start");
+        assert!(result.contains("cargo run"));
+    }
+
+    #[test]
+    fn test_render_bold() {
+        let result = render_markdown("this is **bold** text");
+        assert!(result.contains("bold"));
+        assert!(result.contains("\x1b[1m"));
+    }
+
+    #[test]
+    fn test_render_edge_case_double_star_only() {
+        // Should not panic on "**" with nothing inside
+        let result = render_markdown("**");
+        assert!(result.contains("**"));
+    }
+
+    #[test]
+    fn test_render_single_star() {
+        // Should not panic
+        let result = render_markdown("*");
+        assert!(result.contains("*"));
+    }
+
+    #[test]
+    fn test_visible_char_count_plain() {
+        assert_eq!(visible_char_count("hello"), 5);
+    }
+
+    #[test]
+    fn test_visible_char_count_with_ansi() {
+        assert_eq!(visible_char_count("\x1b[1mhello\x1b[0m"), 5);
+    }
+
+    #[test]
+    fn test_visible_char_count_empty() {
+        assert_eq!(visible_char_count(""), 0);
+    }
+
+    #[test]
+    fn test_find_double_closing_short_input() {
+        // Should not panic on empty or short input
+        assert_eq!(find_double_closing(&[], 0, '*'), None);
+        assert_eq!(find_double_closing(&['*'], 0, '*'), None);
+        assert_eq!(find_double_closing(&['*', '*'], 0, '*'), Some(0));
+    }
 }

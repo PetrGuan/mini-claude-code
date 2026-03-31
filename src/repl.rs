@@ -6,8 +6,7 @@ use crate::api::types::{
 use crate::tools::ToolRegistry;
 use crate::ui::input::read_user_input;
 use crate::ui::render::{
-    count_display_lines, print_response_header, print_separator, print_stream_chunk,
-    render_final_response,
+    count_display_lines, print_separator, print_stream_chunk, render_final_response,
 };
 use crate::ui::spinner::Spinner;
 use anyhow::Result;
@@ -43,10 +42,11 @@ fn format_tool_input(name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string(),
-        "edit" => {
-            let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            format!("{}", path)
-        }
+        "edit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         "glob" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -155,7 +155,6 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
             let mut current_tool_input_json = String::new();
             let mut stream_error = false;
             let mut first_text = true;
-            let mut streamed_lines = 0;
             let mut has_text_content = false;
 
             while let Some(event_result) = rx.recv().await {
@@ -174,7 +173,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                             match content_block {
                                 ContentBlockStartData::Text { text } => {
                                     if first_text {
-                                        print_response_header();
+                                        println!(); // blank line before streaming
                                         first_text = false;
                                     }
                                     current_text = text;
@@ -253,8 +252,8 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                     .join("");
 
                 if !full_text.is_empty() {
-                    streamed_lines = count_display_lines(&full_text);
-                    render_final_response(&full_text, streamed_lines);
+                    let lines = count_display_lines(&full_text);
+                    render_final_response(&full_text, lines);
                 }
             } else {
                 println!();

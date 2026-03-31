@@ -1,13 +1,17 @@
+use std::sync::LazyLock;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::ThemeSet;
 use syntect::parsing::SyntaxSet;
 use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
 
+static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
 /// Syntax-highlight a code block and return the colored string.
 /// Falls back to plain text if the language is unknown.
 pub fn highlight_code(code: &str, lang: &str) -> String {
-    let ss = SyntaxSet::load_defaults_newlines();
-    let ts = ThemeSet::load_defaults();
+    let ss = &*SYNTAX_SET;
+    let ts = &*THEME_SET;
     let theme = &ts.themes["base16-ocean.dark"];
 
     let syntax = ss
