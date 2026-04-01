@@ -2,6 +2,7 @@ mod api;
 mod auth;
 mod cost;
 mod repl;
+mod session;
 mod tools;
 mod ui;
 
