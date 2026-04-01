@@ -5,6 +5,14 @@ use crossterm::terminal;
 use std::io::{self, Write};
 use std::path::PathBuf;
 
+/// RAII guard for raw mode in picker
+struct RawModeGuard;
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        terminal::disable_raw_mode().ok();
+    }
+}
+
 /// Show interactive session picker. Returns selected session path, or None for new session.
 pub fn pick_session(cwd: &str) -> Result<Option<PathBuf>> {
     let sessions = list_sessions(cwd)?;
@@ -21,6 +29,7 @@ pub fn pick_session(cwd: &str) -> Result<Option<PathBuf>> {
     let mut selected: usize = 0;
 
     terminal::enable_raw_mode()?;
+    let _guard = RawModeGuard;
 
     draw_list(&sessions, selected);
     println!();
@@ -70,7 +79,7 @@ pub fn pick_session(cwd: &str) -> Result<Option<PathBuf>> {
         }
     };
 
-    terminal::disable_raw_mode()?;
+    drop(_guard); // disable raw mode
     // Clear the picker UI
     let total_lines = sessions.len() + 2; // list + blank + hint
     for _ in 0..total_lines {

@@ -168,7 +168,9 @@ pub async fn run(
             role: Role::User,
             content: vec![ContentBlock::Text { text: input }],
         });
-        let _ = session.append_message(messages.last().unwrap());
+        if let Err(e) = session.append_message(messages.last().unwrap()) {
+            eprintln!("  \x1b[2mWarning: failed to save session: {}\x1b[0m", e);
+        }
 
         // Tool use loop: keep calling API until model stops using tools
         loop {
@@ -316,7 +318,9 @@ pub async fn run(
                 role: Role::Assistant,
                 content: assistant_content.clone(),
             });
-            let _ = session.append_message(messages.last().unwrap());
+            if let Err(e) = session.append_message(messages.last().unwrap()) {
+            eprintln!("  \x1b[2mWarning: failed to save session: {}\x1b[0m", e);
+        }
 
             let tool_uses: Vec<_> = assistant_content
                 .iter()
@@ -384,7 +388,9 @@ pub async fn run(
                 role: Role::User,
                 content: tool_results,
             });
-            let _ = session.append_message(messages.last().unwrap());
+            if let Err(e) = session.append_message(messages.last().unwrap()) {
+            eprintln!("  \x1b[2mWarning: failed to save session: {}\x1b[0m", e);
+        }
         }
     }
 
