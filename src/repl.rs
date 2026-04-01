@@ -112,7 +112,7 @@ pub async fn run(
     println!();
     println!("  \x1b[1;36m◆ mini-claude-code\x1b[0m \x1b[2mv0.1.0\x1b[0m");
     println!("  \x1b[2m{} · bash, read, write, edit, glob, grep\x1b[0m", client.model);
-    println!("  \x1b[2mEnter to send · /cost for usage · Ctrl+C to exit\x1b[0m");
+    println!("  \x1b[2mEnter to send · /cost for usage · -c to resume · Ctrl+C to exit\x1b[0m");
     println!();
 
     // Show context summary if resuming
