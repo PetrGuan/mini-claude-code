@@ -99,8 +99,12 @@ fn format_tool_preview(content: &str, is_error: bool) -> String {
     formatted.join("\n")
 }
 
-pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()> {
-    let mut messages: Vec<Message> = Vec::new();
+pub async fn run(
+    client: &AnthropicClient,
+    registry: &ToolRegistry,
+    mut session: crate::session::Session,
+    mut messages: Vec<Message>,
+) -> Result<()> {
     let tool_defs = registry.definitions();
     let mut cost = CostTracker::new(&client.model);
 
@@ -110,6 +114,28 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
     println!("  \x1b[2m{} · bash, read, write, edit, glob, grep\x1b[0m", client.model);
     println!("  \x1b[2mEnter to send · /cost for usage · Ctrl+C to exit\x1b[0m");
     println!();
+
+    // Show context summary if resuming
+    if !messages.is_empty() {
+        let user_msgs: Vec<&str> = messages
+            .iter()
+            .filter(|m| matches!(m.role, Role::User))
+            .filter_map(|m| {
+                m.content.iter().find_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+            })
+            .collect();
+
+        let msg_count = messages.len();
+        println!("  \x1b[2mResuming session ({} messages)\x1b[0m", msg_count);
+        if let Some(last) = user_msgs.last() {
+            let preview: String = last.chars().take(80).collect();
+            println!("  \x1b[2mLast: {}\x1b[0m", preview);
+        }
+        println!();
+    }
 
     let mut turn = 0;
     loop {
@@ -142,6 +168,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
             role: Role::User,
             content: vec![ContentBlock::Text { text: input }],
         });
+        let _ = session.append_message(messages.last().unwrap());
 
         // Tool use loop: keep calling API until model stops using tools
         loop {
@@ -289,6 +316,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                 role: Role::Assistant,
                 content: assistant_content.clone(),
             });
+            let _ = session.append_message(messages.last().unwrap());
 
             let tool_uses: Vec<_> = assistant_content
                 .iter()
@@ -356,6 +384,7 @@ pub async fn run(client: &AnthropicClient, registry: &ToolRegistry) -> Result<()
                 role: Role::User,
                 content: tool_results,
             });
+            let _ = session.append_message(messages.last().unwrap());
         }
     }
 
