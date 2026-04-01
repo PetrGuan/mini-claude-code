@@ -18,6 +18,14 @@ struct Cli {
     /// Max tokens for response
     #[arg(long, default_value_t = 8192)]
     max_tokens: u32,
+
+    /// Continue most recent session
+    #[arg(short = 'c', long = "continue")]
+    continue_session: bool,
+
+    /// Resume a session (interactive picker)
+    #[arg(short, long)]
+    resume: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -36,7 +44,37 @@ fn main() -> anyhow::Result<()> {
     tokio::runtime::Runtime::new()?.block_on(async {
         let cwd = std::env::current_dir()?.display().to_string();
 
-        let mut client = api::client::AnthropicClient::new(auth, cli.model, cli.max_tokens);
+        let (session, messages, model) = if cli.continue_session {
+            match session::most_recent_session(&cwd)? {
+                Some(path) => {
+                    let (model, messages) = session::Session::load(&path)?;
+                    let session = session::Session::open_existing(&path, &model)?;
+                    (session, messages, model)
+                }
+                None => {
+                    eprintln!("  \x1b[2mNo previous sessions. Starting new session.\x1b[0m");
+                    let session = session::Session::new(&cwd, &cli.model)?;
+                    (session, Vec::new(), cli.model.clone())
+                }
+            }
+        } else if cli.resume {
+            match ui::picker::pick_session(&cwd)? {
+                Some(path) => {
+                    let (model, messages) = session::Session::load(&path)?;
+                    let session = session::Session::open_existing(&path, &model)?;
+                    (session, messages, model)
+                }
+                None => {
+                    let session = session::Session::new(&cwd, &cli.model)?;
+                    (session, Vec::new(), cli.model.clone())
+                }
+            }
+        } else {
+            let session = session::Session::new(&cwd, &cli.model)?;
+            (session, Vec::new(), cli.model.clone())
+        };
+
+        let mut client = api::client::AnthropicClient::new(auth, model, cli.max_tokens);
         client.set_system_prompt(format!(
             "You are a helpful coding assistant running in the terminal.\n\
              Working directory: {}\n\
@@ -49,6 +87,6 @@ fn main() -> anyhow::Result<()> {
 
         let registry = tools::create_default_registry();
 
-        repl::run(&client, &registry).await
+        repl::run(&client, &registry, session, messages).await
     })
 }
